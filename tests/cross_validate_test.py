@@ -4,8 +4,9 @@ Run with: uv run pytest tests/cross_validate_test.py -v -s
 
 Boxscore accounting conventions discovered through analysis:
 - Spikes count as pass attempts (att)
-- Kneels count as rush attempts in S35+ but NOT in S27
+- Kneels count as rush attempts in S28+ but NOT in S27
 - Each kneel costs -2 rush yards in the boxscore
+- 2-point conversion plays are NOT counted in passing or rushing stats
 - Penalty-nullified plays can cause small per-game discrepancies (typically 1-2 yards)
 """
 
@@ -30,27 +31,45 @@ _KNEELS_COUNT_AS_RUSHES_FROM = 28
 _KNEEL_YARDS = -2
 
 
+def _is_two_point(p) -> bool:
+    """Check if a play is a 2-point conversion attempt (excluded from boxscore stats)."""
+    return "2 point" in p.description or "conversion" in p.description
+
+
 def _game_stats(game, season):
     """Aggregate stats from parsed plays, adjusted for boxscore conventions."""
     pass_yd = sum(
-        p.yards_gained or 0 for p in game.plays if p.play_type == PlayType.PASS
+        p.yards_gained or 0
+        for p in game.plays
+        if p.play_type == PlayType.PASS and not _is_two_point(p)
     )
     comp = sum(
         1
         for p in game.plays
-        if p.play_type == PlayType.PASS and ", complete to" in p.description
+        if p.play_type == PlayType.PASS
+        and ", complete to" in p.description
+        and not _is_two_point(p)
     )
     # Boxscore counts spikes as pass attempts
     att = sum(
         1
         for p in game.plays
-        if (p.play_type == PlayType.PASS and p.passer)
-        or p.play_type == PlayType.SPIKE
+        if (
+            (p.play_type == PlayType.PASS and p.passer)
+            or p.play_type == PlayType.SPIKE
+        )
+        and not _is_two_point(p)
     )
     rush_yd = sum(
-        p.yards_gained or 0 for p in game.plays if p.play_type == PlayType.RUSH
+        p.yards_gained or 0
+        for p in game.plays
+        if p.play_type == PlayType.RUSH and not _is_two_point(p)
     )
-    rush = sum(1 for p in game.plays if p.play_type == PlayType.RUSH)
+    rush = sum(
+        1
+        for p in game.plays
+        if p.play_type == PlayType.RUSH and not _is_two_point(p)
+    )
     kneels = sum(1 for p in game.plays if p.play_type == PlayType.KNEEL)
 
     # Adjust for kneel conventions
@@ -173,11 +192,11 @@ def test_stats_vs_boxscore(season):
         if len(mismatches) > 5:
             print(f"    ... and {len(mismatches) - 5} more")
 
-    # S27+ (JSON): >= 80% match per stat. Remaining mismatches from
+    # S27+ (JSON): >= 92% match per stat. Remaining mismatches from
     # penalty-nullified plays (PBP records original, boxscore excludes).
-    # S1-26 (HTML): >= 50% match. The 2016 engine PBP has lower fidelity —
-    # penalty handling differs, and some plays are absent from the HTML PBP.
-    threshold = 50 if season < ENGINE_CUTOFF_SEASON else 80
+    # S1-26 (HTML): >= 60% match. HTML att is lower due to 2016 engine
+    # penalty handling differences (no "Play nullified by" entries).
+    threshold = 60 if season < ENGINE_CUTOFF_SEASON else 92
     for stat, count in stat_matches.items():
         pct = 100 * count / compared if compared else 100
         assert pct >= threshold, (

@@ -25,6 +25,7 @@ _QUARTER_MAP = {
 _LOGO_RE = re.compile(r"(\d+)_s\.png")
 _GAME_ID_RE = re.compile(r"(?:Logs|Boxscores)/(\d+)\.html")
 _CSS_MAP = {"f": "", "c": "c", "d": "d", "e": "e"}
+_ACTION_START_RE = re.compile(r"^(Kickoff|Punt |Pass |Rush |Free Kick|Onsides? Kick)")
 
 
 def _extract_team_id(td) -> int | None:
@@ -46,11 +47,16 @@ def _extract_css(td) -> str:
 def _is_continuation_row(row_data: dict) -> bool:
     """Check if a row is a continuation of the previous play.
 
-    Continuation rows have the same clock, empty down/distance, and
-    empty field position — e.g. kickoff return narratives split across
-    multiple rows.
+    Continuation rows have empty down/distance and empty field position
+    — e.g. kickoff return narratives split across multiple rows.
+    Rows that start with a primary action keyword (Kickoff, Punt, etc.)
+    are independent plays even if they lack down/distance info.
     """
-    return not row_data["t"] and not row_data["o"]
+    if row_data["t"] or row_data["o"]:
+        return False
+    if _ACTION_START_RE.match(row_data["m"]):
+        return False
+    return True
 
 
 def _parse_html(html: str, game_id: int) -> dict:

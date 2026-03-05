@@ -82,7 +82,9 @@ _ONSIDE_RECOVERY_RE = re.compile(
 )
 _FREE_KICK_RE = re.compile(r"Free Kick by (.+?) of (\d+) yards")
 _PUNT_RE = re.compile(r"Punt by (.+?) of (\d+) yards")
+_PUNT_BLOCKED_RE = re.compile(r"Punt by (.+?) is BLOCKED BY (.+?)\.")
 _FG_RE = re.compile(r"(\d+) yard FG by (.+?) is (good|NO good)")
+_FG_BLOCKED_RE = re.compile(r"(\d+) yard FG by (.+?) is BLOCKED by (.+?)\.")
 _SACK_RE = re.compile(r"(.+?) (?:is )?SACKED by (.+?) - \w+ for (-?\d+) yds")
 _PASS_COMPLETE_RE = re.compile(
     r"Pass by (.+?), complete to (.+?) for (-?\d+ yds|a short gain)"
@@ -205,11 +207,26 @@ def _parse_description(desc: str) -> dict:
             result["yards_gained"] = int(pm.group(2))
         return result
 
+    if m := _PUNT_BLOCKED_RE.search(desc):
+        result["play_type"] = PlayType.PUNT
+        result["kicker"] = m.group(1)
+        if pm := _PUNT_RETURN_RE.search(desc):
+            result["returner"] = pm.group(1)
+            result["yards_gained"] = int(pm.group(2))
+        return result
+
     if m := _FG_RE.search(desc):
         result["play_type"] = PlayType.FIELD_GOAL
         result["fg_distance"] = int(m.group(1))
         result["kicker"] = m.group(2)
         result["fg_good"] = m.group(3) == "good"
+        return result
+
+    if m := _FG_BLOCKED_RE.search(desc):
+        result["play_type"] = PlayType.FIELD_GOAL
+        result["fg_distance"] = int(m.group(1))
+        result["kicker"] = m.group(2)
+        result["fg_good"] = False
         return result
 
     if m := _SACK_RE.search(desc):

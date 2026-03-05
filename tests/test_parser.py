@@ -343,3 +343,38 @@ class TestStructuredFields:
         p = parse_play(raw, 1, 4620)
         assert p.score_away is None
         assert p.score_home is None
+
+
+class TestBlockedPlays:
+    def test_blocked_fg(self):
+        p = parse_play(
+            _make_raw("45 yard FG by Banana, S. is BLOCKED by Egghands, T.."),
+            1, 9630,
+        )
+        assert p.play_type == PlayType.FIELD_GOAL
+        assert p.fg_distance == 45
+        assert p.kicker == "Banana, S."
+        assert p.fg_good is False
+
+    def test_blocked_punt_no_return(self):
+        p = parse_play(
+            _make_raw(
+                "Punt by Bloomfield (R), L. is BLOCKED BY Jones, D.."
+                "<br/> No return.<br/>First Down!"
+            ),
+            1, 9630,
+        )
+        assert p.play_type == PlayType.PUNT
+        assert p.kicker == "Bloomfield (R), L."
+
+    def test_blocked_punt_with_return(self):
+        p = parse_play(
+            _make_raw(
+                "Punt by Powers, V. is BLOCKED BY Allen, O.."
+                "<br/> Returned by Allen, O. for 19 yards.<br/>First Down!"
+            ),
+            1, 9630,
+        )
+        assert p.play_type == PlayType.PUNT
+        assert p.kicker == "Powers, V."
+        assert p.yards_gained == 19
