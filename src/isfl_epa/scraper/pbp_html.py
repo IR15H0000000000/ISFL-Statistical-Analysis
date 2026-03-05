@@ -1,0 +1,185 @@
+"""Scraper for S1-26 (2016 engine) HTML play-by-play pages.
+
+Each game is a separate HTML page with a <table class=Grid> containing
+one <tr> per play. This module fetches the HTML, parses it with
+BeautifulSoup, and normalizes the output to the same dict format used
+by the S27+ JSON scraper so the downstream parser is engine-agnostic.
+"""
+
+import re
+
+import requests
+from bs4 import BeautifulSoup
+
+from isfl_epa.config import League, get_game_results_url, get_pbp_html_url
+from isfl_epa.scraper.cache import get_cached, save_to_cache
+
+_QUARTER_MAP = {
+    "First Quarter": "Q1",
+    "Second Quarter": "Q2",
+    "Third Quarter": "Q3",
+    "Fourth Quarter": "Q4",
+    "Overtime": "OT",
+}
+
+_LOGO_RE = re.compile(r"(\d+)_s\.png")
+_GAME_ID_RE = re.compile(r"(?:Logs|Boxscores)/(\d+)\.html")
+_CSS_MAP = {"f": "", "c": "c", "d": "d", "e": "e"}
+
+
+def _extract_team_id(td) -> int | None:
+    img = td.find("img")
+    if img and img.get("src"):
+        m = _LOGO_RE.search(img["src"])
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _extract_css(td) -> str:
+    for cls in td.get("class", []):
+        if cls in _CSS_MAP:
+            return _CSS_MAP[cls]
+    return ""
+
+
+def _is_continuation_row(row_data: dict) -> bool:
+    """Check if a row is a continuation of the previous play.
+
+    Continuation rows have the same clock, empty down/distance, and
+    empty field position — e.g. kickoff return narratives split across
+    multiple rows.
+    """
+    return not row_data["t"] and not row_data["o"]
+
+
+def _parse_html(html: str, game_id: int) -> dict:
+    """Parse an HTML PBP page into the normalized Format A dict."""
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="Grid")
+    if not table:
+        return {"id": game_id, "Q1": [], "Q2": [], "Q3": [], "Q4": [], "OT": []}
+
+    quarters: dict[str, list[dict]] = {
+        "Q1": [], "Q2": [], "Q3": [], "Q4": [], "OT": [],
+    }
+    current_quarter = "Q1"
+
+    rows = table.find_all("tr")
+    for row in rows:
+        # Check for quarter header
+        th = row.find("th")
+        if th:
+            text = th.get_text(strip=True)
+            for label, qkey in _QUARTER_MAP.items():
+                if label in text:
+                    current_quarter = qkey
+                    # Add quarter marker play
+                    quarters[current_quarter].append({
+                        "c": "15:00",
+                        "t": "---",
+                        "o": "--",
+                        "m": text,
+                        "css": "",
+                        "s": None,
+                    })
+                    break
+            continue
+
+        tds = row.find_all("td")
+        if len(tds) < 5:
+            continue
+
+        team_id = _extract_team_id(tds[0])
+        clock = tds[1].get_text(strip=True)
+        down_dist = tds[2].get_text(strip=True)
+        field_pos = tds[3].get_text(strip=True)
+        description = tds[4].get_text(strip=True)
+        css = _extract_css(tds[4])
+
+        row_data = {
+            "c": clock,
+            "t": down_dist,
+            "o": field_pos,
+            "m": description,
+            "css": css,
+            "s": None,
+        }
+        if team_id is not None:
+            row_data["id"] = team_id
+
+        # Merge continuation rows into the previous play
+        plays = quarters[current_quarter]
+        if plays and _is_continuation_row(row_data):
+            prev = plays[-1]
+            prev["m"] = prev["m"] + "<br/>" + description
+            # Promote css if the continuation has a more specific class
+            if css and not prev["css"]:
+                prev["css"] = css
+        else:
+            plays.append(row_data)
+
+    return {"id": game_id, **quarters}
+
+
+def fetch_game_html(
+    league: League,
+    season: int,
+    game_id: int,
+    *,
+    force_refresh: bool = False,
+) -> dict:
+    """Fetch and parse an HTML PBP page for a single game (S1-26).
+
+    Returns a dict in the same shape as the S27+ JSON format:
+    {"id": game_id, "Q1": [...], "Q2": [...], ...}
+    """
+    if not force_refresh:
+        cached = get_cached(league, season, "pbp_html", game_id)
+        if cached is not None:
+            return cached
+
+    url = get_pbp_html_url(league, season, game_id)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    game = _parse_html(resp.text, game_id)
+    save_to_cache(league, season, "pbp_html", game_id, game)
+    return game
+
+
+def fetch_game_ids(
+    league: League, season: int, *, force_refresh: bool = False
+) -> list[int]:
+    """Discover all game IDs for an HTML-era season from GameResults.html."""
+    if not force_refresh:
+        cached = get_cached(league, season, "game_ids", 0)
+        if cached is not None:
+            return cached
+
+    url = get_game_results_url(league, season)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    ids = set()
+    for a in soup.find_all("a", href=True):
+        m = _GAME_ID_RE.search(a["href"])
+        if m:
+            ids.add(int(m.group(1)))
+
+    result = sorted(ids)
+    save_to_cache(league, season, "game_ids", 0, result)
+    return result
+
+
+def fetch_all_season_pbp_html(
+    league: League, season: int, *, force_refresh: bool = False
+) -> list[dict]:
+    """Fetch all PBP data for an HTML-era season."""
+    game_ids = fetch_game_ids(league, season, force_refresh=force_refresh)
+    all_games = []
+    for gid in game_ids:
+        game = fetch_game_html(league, season, gid, force_refresh=force_refresh)
+        all_games.append(game)
+    return all_games

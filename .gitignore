@@ -1,0 +1,12 @@
+.claude/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+data/raw/
+data/processed/
+data/models/
+uv.lock
