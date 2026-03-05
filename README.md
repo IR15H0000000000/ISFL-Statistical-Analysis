@@ -21,7 +21,7 @@ This project:
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 1. Data Extraction | Done | Scraper, decompression, caching for both engine eras |
-| 2. Play Parsing | Done | Regex-based parser — 99.98% parse rate, boxscore-validated |
+| 2. Play Parsing | Done | Regex-based parser — ~100% parse rate, cross-validated against boxscores |
 | 3. Stats Aggregation | Not started | Player and team stat calculations |
 | 4. EPA Model | Not started | Expected points model + EPA/play |
 
@@ -105,7 +105,8 @@ src/isfl_epa/
   scraper/
     pbp.py           # Fetch + decompress S27+ JSON PBP data
     pbp_html.py      # Fetch + parse S1-26 HTML PBP pages
-    boxscore.py      # Fetch + decompress boxscore data
+    boxscore.py      # Fetch + decompress S27+ JSON boxscore data
+    boxscore_html.py # Fetch + parse S1-26 HTML boxscore pages
     cache.py         # Local JSON file cache
   parser/
     schema.py        # Pydantic models (PlayType, ParsedPlay, Game)
@@ -113,7 +114,8 @@ src/isfl_epa/
   stats/             # (Phase 3) Player and team stat aggregation
   epa/               # (Phase 4) Expected points model + EPA calculation
 tests/
-  test_parser.py     # 43 tests covering all play types and edge cases
+  test_parser.py          # 46 unit tests covering all play types and edge cases
+  cross_validate_test.py  # 16 tests cross-validating parsed stats vs boxscores (8 seasons)
 notebooks/
   01_data_exploration.ipynb  # Raw data exploration
 data/
@@ -129,16 +131,36 @@ The play parser (`parser/play_parser.py`) handles both engine formats by normali
 1. **Structured field parsers** — extract down/distance, field position, and score from `t`, `o`, `s` fields
 2. **Description parser** — match the primary action (pass, rush, sack, kick, etc.) then apply overlay checks (touchdown, fumble, interception, first down, PAT, etc.)
 
-Supported play types: pass (complete/incomplete/intercepted/throwaway), rush, sack, punt, kickoff (touchback/return/onside), field goal, kneel, spike, penalty (nullifying/standalone), timeout, quarter markers.
+Supported play types: pass (complete/incomplete/intercepted/throwaway), rush, sack, punt (including blocked), kickoff (touchback/return/onside), field goal (including blocked), kneel, spike, penalty (nullifying/standalone), timeout, quarter markers.
 
-**Validation:** 99.98% parse rate on S50 (24,631/24,635 plays). Pass yards, completions, attempts, rush yards, and rush attempts all match boxscore data exactly.
+### Cross-Validation
+
+Parser output is validated against boxscore data across 8 seasons (S25, S26, S27, S28, S35, S45, S50, S59) covering both engine eras and ~1,100 games.
+
+| Metric | S27+ (JSON) | S1–26 (HTML) |
+|--------|-------------|--------------|
+| Parse rate | ~100% | ~100% |
+| rush / rush_yd | 95–100% | 92–96% |
+| pass_yd / comp | 97–100% | 93–95% |
+| att | 93–97% | 62–69% |
+
+**Boxscore accounting conventions** discovered through analysis:
+- Spikes count as pass attempts; sacks do not
+- Kneels count as rush attempts in S28+ but not S27 (each kneel = -2 rush yards)
+- 2-point conversion plays are excluded from passing and rushing totals
+
+**Remaining mismatches** are caused by penalty-nullified plays. When a play is nullified, the PBP replaces the original description with the penalty text (e.g., `"Play nullified by X Penalty on Y: Holding"`). The original action (pass/rush) and its yardage are lost from the PBP data but may still be counted in the boxscore. This affects:
+- **att (all seasons):** ~3–8% of games have boxscore att 1 higher than PBP, from a nullified pass attempt whose `"Pass "` prefix was not preserved
+- **pass_yd (rare):** 1–3 games per season where a long completion was nullified, creating a 10–60 yard gap
+- **HTML att (S25/S26):** Higher mismatch rate because the 2016 engine uses standalone penalty entries rather than `"Play nullified by"` format, making it impossible to associate penalties with the original play
+
+These are inherent data limitations of the PBP format, not parser bugs.
 
 ## Roadmap
 
 ### Phase 3: Stats Aggregation
 - Per-player stats: passing, rushing, receiving, defensive
 - Per-team stats: total offense/defense, turnover diff, 3rd down rate
-- Cross-validation against boxscore data
 
 ### Phase 4: EPA Model
 - Train an Expected Points model on historical ISFL data (separate from NFL — different sim distributions)
