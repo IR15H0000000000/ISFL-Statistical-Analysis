@@ -14,16 +14,28 @@ def scrape(
     force_refresh: bool = typer.Option(False, help="Re-download even if cached"),
 ):
     """Download and cache PBP and boxscore data for a season."""
-    from isfl_epa.scraper.boxscore import fetch_all_season_boxscores
-    from isfl_epa.scraper.pbp import fetch_all_season_pbp
+    from isfl_epa.config import ENGINE_CUTOFF_SEASON
 
     console.print(f"Scraping {league.value} Season {season}...")
 
-    games = fetch_all_season_pbp(league, season, force_refresh=force_refresh)
-    console.print(f"  PBP: {len(games)} games")
+    if season < ENGINE_CUTOFF_SEASON:
+        from isfl_epa.scraper.boxscore_html import fetch_all_season_boxscores_html
+        from isfl_epa.scraper.pbp_html import fetch_all_season_pbp_html
 
-    boxscores = fetch_all_season_boxscores(league, season, force_refresh=force_refresh)
-    console.print(f"  Boxscores: {len(boxscores)} games")
+        games = fetch_all_season_pbp_html(league, season, force_refresh=force_refresh)
+        console.print(f"  PBP: {len(games)} games")
+
+        boxscores = fetch_all_season_boxscores_html(league, season, force_refresh=force_refresh)
+        console.print(f"  Boxscores: {len(boxscores)} games")
+    else:
+        from isfl_epa.scraper.boxscore import fetch_all_season_boxscores
+        from isfl_epa.scraper.pbp import fetch_all_season_pbp
+
+        games = fetch_all_season_pbp(league, season, force_refresh=force_refresh)
+        console.print(f"  PBP: {len(games)} games")
+
+        boxscores = fetch_all_season_boxscores(league, season, force_refresh=force_refresh)
+        console.print(f"  Boxscores: {len(boxscores)} games")
 
     console.print("[green]Done![/green]")
 
@@ -60,6 +72,7 @@ def build(
     from isfl_epa.storage.database import (
         create_tables,
         get_engine,
+        init_registry_from_db,
         load_registry,
         load_season,
     )
@@ -79,14 +92,15 @@ def build(
     games = [parse_game(g, season, league.value) for g in raw_games]
     console.print(f"  Parsed {len(games)} games")
 
-    # Register players
+    # Set up DB and seed registry with existing players so IDs are stable across seasons
+    engine = get_engine(database_url)
+    create_tables(engine)
     registry = PlayerRegistry()
+    init_registry_from_db(engine, registry)
     registry.build_from_games(games)
     console.print(f"  Registered {registry.player_count} players")
 
     # Load into PostgreSQL
-    engine = get_engine(database_url)
-    create_tables(engine)
     load_registry(engine, registry)
     load_season(engine, games, registry)
     console.print("  Loaded into PostgreSQL")
@@ -222,6 +236,103 @@ def player(
         else:
             console.print("[red]Provide --name or --id[/red]")
             raise typer.Exit(1)
+
+
+@app.command()
+def summary(
+    season: int = typer.Option(None, help="Filter to a single season"),
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Show a summary of all parsed data in the database."""
+    from rich.table import Table as RichTable
+    from sqlalchemy import Integer, distinct, func, select
+
+    from isfl_epa.storage.database import get_engine, players_table, plays_table
+
+    engine = get_engine(database_url)
+    t = plays_table
+
+    with engine.connect() as conn:
+        # Build season filter
+        where = t.c.season == season if season else True
+
+        # Overall totals
+        totals = conn.execute(
+            select(
+                func.count(distinct(t.c.season)).label("seasons"),
+                func.count(distinct(t.c.game_id)).label("games"),
+                func.count().label("plays"),
+            ).where(where)
+        ).first()
+
+        player_count = conn.execute(
+            select(func.count()).select_from(players_table)
+        ).scalar()
+
+        console.print()
+        console.print("[bold]Parsed Data Summary[/bold]")
+        console.print(f"  Seasons: {totals.seasons}")
+        console.print(f"  Games:   {totals.games:,}")
+        console.print(f"  Plays:   {totals.plays:,}")
+        console.print(f"  Players: {player_count:,}")
+
+        # Play type breakdown
+        type_rows = conn.execute(
+            select(
+                t.c.play_type,
+                func.count().label("count"),
+            )
+            .where(where)
+            .group_by(t.c.play_type)
+            .order_by(func.count().desc())
+        ).fetchall()
+
+        type_table = RichTable(title="Play Type Breakdown")
+        type_table.add_column("Play Type")
+        type_table.add_column("Count", justify="right")
+        type_table.add_column("Pct", justify="right")
+        for row in type_rows:
+            pct = row.count / totals.plays * 100 if totals.plays else 0
+            type_table.add_row(row.play_type, f"{row.count:,}", f"{pct:.1f}%")
+        console.print()
+        console.print(type_table)
+
+        # Per-season table
+        season_rows = conn.execute(
+            select(
+                t.c.season,
+                func.count(distinct(t.c.game_id)).label("games"),
+                func.count().label("plays"),
+                func.sum(func.cast(t.c.play_type == "pass", Integer)).label("pass_plays"),
+                func.sum(func.cast(t.c.play_type == "rush", Integer)).label("rush_plays"),
+                func.sum(func.cast(t.c.touchdown == True, Integer)).label("tds"),  # noqa: E712
+                func.sum(func.cast(t.c.interception == True, Integer)).label("ints"),  # noqa: E712
+            )
+            .where(where)
+            .group_by(t.c.season)
+            .order_by(t.c.season)
+        ).fetchall()
+
+        season_table = RichTable(title="Per-Season Summary")
+        season_table.add_column("Season", justify="right")
+        season_table.add_column("Games", justify="right")
+        season_table.add_column("Plays", justify="right")
+        season_table.add_column("Pass", justify="right")
+        season_table.add_column("Rush", justify="right")
+        season_table.add_column("TDs", justify="right")
+        season_table.add_column("INTs", justify="right")
+        for row in season_rows:
+            season_table.add_row(
+                str(row.season),
+                str(row.games),
+                f"{row.plays:,}",
+                f"{row.pass_plays or 0:,}",
+                f"{row.rush_plays or 0:,}",
+                str(row.tds or 0),
+                str(row.ints or 0),
+            )
+        console.print()
+        console.print(season_table)
 
 
 if __name__ == "__main__":

@@ -23,9 +23,11 @@ from sqlalchemy import (
     Table,
     Text,
     create_engine,
+    func,
     insert,
     select,
 )
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
 from isfl_epa.parser.schema import Game, PlayType
@@ -60,7 +62,7 @@ player_names_table = Table(
     Column("player_id", Integer, ForeignKey("players.player_id"), nullable=False),
     Column("name", Text, nullable=False),
     Column("season", Integer, nullable=False),
-    Column("team", String(10)),
+    Column("team", String(50)),
     Index("ix_player_names_unique", "name", "season", unique=True),
 )
 
@@ -69,9 +71,9 @@ plays_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
-    Column("league", String(10)),
+    Column("league", String(50)),
     Column("quarter", Integer),
-    Column("clock", String(10)),
+    Column("clock", String(50)),
     Column("play_index", Integer),
     Column("play_type", String(20)),
     Column("description", Text),
@@ -81,13 +83,13 @@ plays_table = Table(
     Column("distance", Integer),
     Column("distance_text", String(20)),
     Column("yard_line", Integer),
-    Column("yard_line_team", String(10)),
+    Column("yard_line_team", String(50)),
     Column("possession_team_id", Integer),
     # Score
     Column("score_away", Integer),
     Column("score_home", Integer),
-    Column("away_team", String(10)),
-    Column("home_team", String(10)),
+    Column("away_team", String(50)),
+    Column("home_team", String(50)),
     # Outcomes
     Column("yards_gained", Integer),
     Column("first_down", Boolean, default=False),
@@ -98,7 +100,7 @@ plays_table = Table(
     Column("safety", Boolean, default=False),
     Column("turnover_on_downs", Boolean, default=False),
     Column("penalty", Boolean, default=False),
-    Column("penalty_team", String(10)),
+    Column("penalty_team", Text),
     Column("penalty_type", String(50)),
     Column("penalty_auto_first", Boolean, default=False),
     # Player names (raw)
@@ -143,8 +145,8 @@ team_games_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
-    Column("team", String(10), nullable=False),
-    Column("opponent", String(10)),
+    Column("team", String(50), nullable=False),
+    Column("opponent", String(50)),
     Column("is_home", Boolean),
     Column("points_for", Integer, default=0),
     Column("points_against", Integer, default=0),
@@ -174,7 +176,7 @@ player_game_passing_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("player_id", Integer, ForeignKey("players.player_id")),
     Column("player", Text, nullable=False),
-    Column("team", String(10)),
+    Column("team", String(50)),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
     Column("comp", Integer, default=0),
@@ -193,7 +195,7 @@ player_game_rushing_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("player_id", Integer, ForeignKey("players.player_id")),
     Column("player", Text, nullable=False),
-    Column("team", String(10)),
+    Column("team", String(50)),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
     Column("att", Integer, default=0),
@@ -209,7 +211,7 @@ player_game_receiving_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("player_id", Integer, ForeignKey("players.player_id")),
     Column("player", Text, nullable=False),
-    Column("team", String(10)),
+    Column("team", String(50)),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
     Column("receptions", Integer, default=0),
@@ -225,7 +227,7 @@ player_game_defensive_table = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("player_id", Integer, ForeignKey("players.player_id")),
     Column("player", Text, nullable=False),
-    Column("team", String(10)),
+    Column("team", String(50)),
     Column("game_id", Integer, nullable=False),
     Column("season", Integer, nullable=False),
     Column("tackles", Integer, default=0),
@@ -261,24 +263,64 @@ def _resolve_player_id(registry: PlayerRegistry, name: str | None, season: int, 
     return registry.get_or_create(name, season, team)
 
 
+def init_registry_from_db(engine: Engine, registry: PlayerRegistry) -> None:
+    """Seed an empty registry with existing player data so IDs are stable across builds."""
+    with engine.connect() as conn:
+        # Load canonical player records
+        players = conn.execute(select(players_table)).fetchall()
+        for p in players:
+            registry._players[p.player_id] = {
+                "canonical_name": p.canonical_name,
+                "first_seen_season": p.first_seen_season,
+                "last_seen_season": p.last_seen_season,
+            }
+            if p.player_id not in registry._aliases:
+                registry._aliases[p.player_id] = []
+
+        # Load all known name aliases so get_or_create finds them
+        rows = conn.execute(select(player_names_table)).fetchall()
+        for row in rows:
+            norm = row.name.strip().lower()
+            if norm not in registry._name_to_id:
+                registry._name_to_id[norm] = row.player_id
+            registry._aliases.setdefault(row.player_id, [])
+            alias = {"name": row.name, "season": row.season, "team": row.team}
+            if alias not in registry._aliases[row.player_id]:
+                registry._aliases[row.player_id].append(alias)
+
+        # Set next_id beyond the current max so new players get unique IDs
+        max_id = conn.execute(select(func.max(players_table.c.player_id))).scalar() or 0
+        registry._next_id = max_id + 1
+
+
 def load_registry(engine: Engine, registry: PlayerRegistry) -> None:
-    """Write the in-memory player registry to PostgreSQL."""
+    """Write the in-memory player registry to PostgreSQL (upsert-safe)."""
     with engine.begin() as conn:
         for p in registry.all_players():
-            conn.execute(insert(players_table).values(
-                player_id=p["player_id"],
-                canonical_name=p["canonical_name"],
-                first_seen_season=p["first_seen_season"],
-                last_seen_season=p["last_seen_season"],
-            ))
+            conn.execute(
+                pg_insert(players_table).values(
+                    player_id=p["player_id"],
+                    canonical_name=p["canonical_name"],
+                    first_seen_season=p["first_seen_season"],
+                    last_seen_season=p["last_seen_season"],
+                ).on_conflict_do_update(
+                    index_elements=["player_id"],
+                    set_={
+                        "first_seen_season": p["first_seen_season"],
+                        "last_seen_season": p["last_seen_season"],
+                    },
+                )
+            )
         for pid, aliases in ((pid, registry.get_aliases(pid)) for pid in (p["player_id"] for p in registry.all_players())):
             for alias in aliases:
-                conn.execute(insert(player_names_table).values(
-                    player_id=pid,
-                    name=alias["name"],
-                    season=alias["season"],
-                    team=alias["team"],
-                ))
+                conn.execute(
+                    pg_insert(player_names_table).values(
+                        player_id=pid,
+                        name=alias["name"],
+                        season=alias["season"],
+                        team=alias["team"],
+                    ).on_conflict_do_nothing()
+                )
 
 
 def load_season(
