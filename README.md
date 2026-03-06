@@ -22,7 +22,7 @@ This project:
 |-------|--------|-------------|
 | 1. Data Extraction | Done | Scraper, decompression, caching for both engine eras |
 | 2. Play Parsing | Done | Regex-based parser — ~100% parse rate, cross-validated against boxscores |
-| 3. Stats Aggregation | Not started | Player and team stat calculations |
+| 3. Stats Aggregation | Done | Player/team stats, player registry, PostgreSQL + Parquet storage, FastAPI |
 | 4. EPA Model | Not started | Expected points model + EPA/play |
 
 ## Setup
@@ -34,6 +34,15 @@ uv sync              # install dependencies
 uv sync --all-extras # include dev dependencies (jupyter, pytest, etc.)
 ```
 
+### Docker (for PostgreSQL + API)
+
+```bash
+docker compose up -d    # start PostgreSQL + FastAPI
+docker compose down     # stop
+```
+
+The API runs at `http://localhost:8000` with auto-generated docs at `/docs`.
+
 ## Usage
 
 ### CLI
@@ -44,6 +53,21 @@ uv run isfl-epa scrape --league ISFL --season 50
 
 # Dump raw play-by-play JSON for a specific game
 uv run isfl-epa explore --league ISFL --season 50 --game-id 9630
+
+# Parse a season and load into PostgreSQL + Parquet
+uv run isfl-epa build --league ISFL --season 50
+
+# View season stats
+uv run isfl-epa stats --season 50 --stat passing --top 10
+uv run isfl-epa stats --season 50 --stat rushing --top 10
+uv run isfl-epa stats --season 50 --stat team
+
+# Export stats to file
+uv run isfl-epa stats --season 50 --stat team --output data/processed/team_s50.csv
+
+# Look up a player
+uv run isfl-epa player --name "Patterson, J."
+uv run isfl-epa player --id 42
 ```
 
 ### Python API
@@ -101,7 +125,7 @@ Each play object contains:
 ```
 src/isfl_epa/
   config.py          # URLs, season ranges, engine version mapping
-  cli.py             # Typer CLI (scrape, explore)
+  cli.py             # Typer CLI (scrape, explore, build, stats, player)
   scraper/
     pbp.py           # Fetch + decompress S27+ JSON PBP data
     pbp_html.py      # Fetch + parse S1-26 HTML PBP pages
@@ -111,11 +135,27 @@ src/isfl_epa/
   parser/
     schema.py        # Pydantic models (PlayType, ParsedPlay, Game)
     play_parser.py   # Regex pipeline: structured fields + play descriptions
-  stats/             # (Phase 3) Player and team stat aggregation
+  stats/
+    models.py        # Pydantic stat-line models (passing, rushing, etc.)
+    aggregation.py   # Game -> player/team stat aggregation
+  players/
+    registry.py      # Cross-season player identity linking
+    overrides.yaml   # Manual name correction overrides
+  storage/
+    database.py      # PostgreSQL schema, load, query (SQLAlchemy Core)
+    parquet.py       # Parquet read/write for bulk analysis
+  api/
+    app.py           # FastAPI application
+    routes/          # API endpoints (plays, stats, players)
   epa/               # (Phase 4) Expected points model + EPA calculation
 tests/
-  test_parser.py          # 46 unit tests covering all play types and edge cases
-  cross_validate_test.py  # 16 tests cross-validating parsed stats vs boxscores (8 seasons)
+  test_parser.py              # 46 unit tests covering all play types and edge cases
+  cross_validate_test.py      # 16 tests cross-validating parsed stats vs boxscores
+  stats_test.py               # 29 unit tests for stats aggregation
+  stats_cross_validate_test.py # 8 tests validating stats vs boxscores
+  registry_test.py            # 14 tests for player registry
+  storage_test.py             # Parquet + PostgreSQL round-trip tests
+  api_test.py                 # 11 FastAPI endpoint tests
 notebooks/
   01_data_exploration.ipynb  # Raw data exploration
 data/
@@ -156,11 +196,27 @@ Parser output is validated against boxscore data across 8 seasons (S25, S26, S27
 
 These are inherent data limitations of the PBP format, not parser bugs.
 
-## Roadmap
+## API Endpoints
 
-### Phase 3: Stats Aggregation
-- Per-player stats: passing, rushing, receiving, defensive
-- Per-team stats: total offense/defense, turnover diff, 3rd down rate
+When running via Docker Compose, the FastAPI server provides:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /plays/?season=&game_id=&play_type=&player_id=` | Query plays with filters |
+| `GET /plays/{game_id}` | All plays for a game |
+| `GET /stats/passing?season=&top=` | Season passing leaders |
+| `GET /stats/rushing?season=&top=` | Season rushing leaders |
+| `GET /stats/receiving?season=&top=` | Season receiving leaders |
+| `GET /stats/defensive?season=&top=` | Season defensive leaders |
+| `GET /stats/team?season=` | Team season stats |
+| `GET /stats/player/{id}/game-log?category=` | Player game log |
+| `GET /players/?name=&season=` | Search players |
+| `GET /players/{id}` | Player profile with career stats |
+| `GET /players/{id}/plays` | All plays involving a player |
+
+Full OpenAPI docs at `http://localhost:8000/docs`.
+
+## Roadmap
 
 ### Phase 4: EPA Model
 - Train an Expected Points model on historical ISFL data (separate from NFL — different sim distributions)

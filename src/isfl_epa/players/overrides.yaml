@@ -1,0 +1,7 @@
+# Manual player identity overrides for cross-season linking.
+# Use when the same player appears under different name formats.
+#
+# merge:
+#   - canonical: "Smith, J."
+#     aliases: ["J. Smith", "Smith, John"]
+merge: []
