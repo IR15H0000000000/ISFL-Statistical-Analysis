@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import typer
 from rich.console import Console
 
@@ -333,6 +335,218 @@ def summary(
             )
         console.print()
         console.print(season_table)
+
+
+@app.command()
+def train_ep(
+    model_type: str = typer.Option("hgb_reg", help="Model type: hgb_reg, hgb, or logistic"),
+    league: League = typer.Option(League.ISFL),
+    era: str = typer.Option("both", help="Era to train: 2016, 2022, or both"),
+):
+    """Train era-specific Expected Points models."""
+    from isfl_epa.epa.dataset import (
+        build_drive_feature_matrix,
+        build_era_feature_matrix,
+        label_drive_outcome,
+        label_next_score,
+        load_training_plays,
+    )
+    from isfl_epa.epa.model import MODEL_2016_PATH, MODEL_2022_PATH, EPModel
+
+    is_regression = model_type == "hgb_reg"
+
+    eras = {}
+    if era in ("2016", "both"):
+        eras["2016"] = {
+            "train_seasons": list(range(1, 24)),
+            "test_seasons": list(range(24, 27)),
+            "save_path": MODEL_2016_PATH,
+        }
+    if era in ("2022", "both"):
+        test_2022 = list(range(27, 60, 5))  # every 5th season: 27,32,37,...,57
+        train_2022 = [s for s in range(27, 60) if s not in test_2022]
+        eras["2022"] = {
+            "train_seasons": train_2022,
+            "test_seasons": test_2022,
+            "save_path": MODEL_2022_PATH,
+        }
+
+    for era_name, cfg in eras.items():
+        console.print(f"\n[bold]Training {era_name} era model ({model_type})[/bold]")
+
+        console.print(f"  Loading training data ({len(cfg['train_seasons'])} seasons)...")
+        train_df = load_training_plays(cfg["train_seasons"], league.value)
+        console.print(f"  {len(train_df):,} plays loaded")
+
+        if is_regression:
+            console.print("  Labeling drive outcomes...")
+            train_df = label_drive_outcome(train_df)
+            console.print("  Building feature matrix...")
+            X_train, y_train, _, is_start = build_drive_feature_matrix(train_df)
+            # Train on drive starts only for better calibration at drive boundaries
+            X_train = X_train[is_start]
+            y_train = y_train[is_start]
+        else:
+            console.print("  Labeling next-score events...")
+            train_df = label_next_score(train_df)
+            console.print("  Building feature matrix...")
+            X_train, y_train = build_era_feature_matrix(train_df)
+        console.print(f"  {len(X_train):,} training samples")
+
+        console.print(f"  Loading test data ({len(cfg['test_seasons'])} seasons)...")
+        test_df = load_training_plays(cfg["test_seasons"], league.value)
+        if is_regression:
+            test_df = label_drive_outcome(test_df)
+            X_test, y_test, _, is_start_test = build_drive_feature_matrix(test_df)
+            X_test = X_test[is_start_test]
+            y_test = y_test[is_start_test]
+        else:
+            test_df = label_next_score(test_df)
+            X_test, y_test = build_era_feature_matrix(test_df)
+        console.print(f"  {len(X_test):,} test samples")
+
+        ep = EPModel()
+        train_metrics = ep.train(X_train, y_train, model_type=model_type)
+        test_metrics = ep.evaluate(X_test, y_test)
+
+        if is_regression:
+            console.print(f"  Train MAE: {train_metrics['train_mae']:.4f}")
+            console.print(f"  Test MAE:  {test_metrics['mae']:.4f}")
+            console.print(f"  Test R²:   {test_metrics['r2']:.4f}")
+        else:
+            console.print(f"  Train log-loss: {train_metrics['train_log_loss']:.4f}")
+            console.print(f"  Test log-loss:  {test_metrics['log_loss']:.4f}")
+
+        ep.save(cfg["save_path"])
+        console.print(f"  [green]Saved to {cfg['save_path']}[/green]")
+
+
+@app.command()
+def compute_epa(
+    league: League = typer.Option(League.ISFL),
+    season: int = typer.Option(..., help="Season to compute EPA for"),
+    model_path: str = typer.Option(None, help="Path to trained EP model"),
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Compute EPA for all plays in a season."""
+    from isfl_epa.epa.calculator import compute_epa_for_season
+    from isfl_epa.epa.model import DEFAULT_MODEL_PATH, EPModel, EPModelPair
+    from isfl_epa.storage.database import (
+        create_tables,
+        get_engine,
+        load_epa_season,
+    )
+    from isfl_epa.storage.parquet import write_epa_results
+
+    if model_path:
+        console.print(f"Loading EP model from {model_path}...")
+        ep_model = EPModel.load(model_path)
+    else:
+        console.print("Loading era-specific EP models...")
+        ep_model = EPModelPair.load()
+
+    console.print(f"Computing EPA for {league.value} S{season}...")
+    epa_df = compute_epa_for_season(season, league.value, ep_model)
+    valid_count = epa_df["epa"].notna().sum()
+    console.print(f"  {valid_count:,} plays with EPA (of {len(epa_df):,} total)")
+
+    if valid_count > 0:
+        mean_epa = epa_df["epa"].dropna().mean()
+        console.print(f"  Mean EPA: {mean_epa:.4f}")
+
+    # Write Parquet
+    parquet_path = write_epa_results(epa_df, season, league.value)
+    console.print(f"  Wrote Parquet: {parquet_path}")
+
+    # Load into PostgreSQL
+    engine = get_engine(database_url)
+    create_tables(engine)
+    load_epa_season(engine, epa_df, season)
+    console.print("  Loaded into PostgreSQL")
+
+    console.print("[green]Done![/green]")
+
+
+@app.command()
+def epa_stats(
+    league: League = typer.Option(League.ISFL),
+    season: int = typer.Option(..., help="Season"),
+    stat: str = typer.Option("passing", help="Category: passing, rushing, receiving, team"),
+    top: int = typer.Option(20, help="Number of rows to display"),
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Display EPA leaders for a season."""
+    from rich.table import Table as RichTable
+    from sqlalchemy import desc, select
+
+    from isfl_epa.storage.database import (
+        get_engine,
+        player_season_epa_table,
+        team_season_epa_table,
+    )
+
+    engine = get_engine(database_url)
+
+    with engine.connect() as conn:
+        if stat == "team":
+            rows = conn.execute(
+                select(team_season_epa_table)
+                .where(team_season_epa_table.c.season == season)
+                .order_by(desc(team_season_epa_table.c.epa_per_play))
+            ).fetchall()
+
+            table = RichTable(title=f"{league.value} S{season} Team EPA")
+            table.add_column("Team")
+            table.add_column("Total EPA", justify="right")
+            table.add_column("Pass EPA", justify="right")
+            table.add_column("Rush EPA", justify="right")
+            table.add_column("Plays", justify="right")
+            table.add_column("EPA/Play", justify="right")
+            for r in rows:
+                table.add_row(
+                    r.team,
+                    f"{r.total_epa:.1f}",
+                    f"{r.pass_epa:.1f}",
+                    f"{r.rush_epa:.1f}",
+                    str(r.plays),
+                    f"{r.epa_per_play:.3f}",
+                )
+            console.print(table)
+        else:
+            t = player_season_epa_table
+            col_map = {
+                "passing": ("pass_epa", "dropbacks", "epa_per_dropback", 100),
+                "rushing": ("rush_epa", "rush_attempts", "epa_per_rush", 50),
+                "receiving": ("recv_epa", "targets", "epa_per_target", 30),
+            }
+            if stat not in col_map:
+                console.print(f"[red]Unknown stat: {stat}[/red]")
+                raise typer.Exit(1)
+
+            epa_col, count_col, rate_col, min_plays = col_map[stat]
+            rows = conn.execute(
+                select(t)
+                .where(t.c.season == season)
+                .where(getattr(t.c, count_col) >= min_plays)
+                .order_by(desc(getattr(t.c, rate_col)))
+                .limit(top)
+            ).fetchall()
+
+            table = RichTable(title=f"{league.value} S{season} {stat.title()} EPA")
+            table.add_column("Player")
+            table.add_column("Team")
+            table.add_column("Total EPA", justify="right")
+            table.add_column("Plays", justify="right")
+            table.add_column("EPA/Play", justify="right")
+            for r in rows:
+                table.add_row(
+                    r.player,
+                    r.team or "",
+                    f"{getattr(r, epa_col):.1f}",
+                    str(getattr(r, count_col)),
+                    f"{getattr(r, rate_col):.3f}",
+                )
+            console.print(table)
 
 
 if __name__ == "__main__":
