@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISFL Team Statistics</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a2e;
+  }
+
+  header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 3rem 2rem 1.5rem;
+    text-align: center;
+  }
+
+  header .label {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    color: #56d6d6;
+    margin-bottom: 0.5rem;
+  }
+
+  header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  nav {
+    display: flex;
+    justify-content: center;
+    gap: 0;
+    margin-top: 1.5rem;
+  }
+
+  nav button {
+    padding: 0.6rem 2rem;
+    border: 1px solid #3a3a5e;
+    background: transparent;
+    color: #8888aa;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  nav button:first-child { border-radius: 4px 0 0 4px; }
+  nav button:last-child { border-radius: 0 4px 4px 0; }
+
+  nav button.active {
+    background: #56d6d6;
+    color: #1a1a2e;
+    border-color: #56d6d6;
+  }
+
+  nav button:hover:not(.active) {
+    background: #2a2a4e;
+    color: #ccc;
+  }
+
+  .controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1400px;
+    margin: 1.5rem auto 0.75rem;
+    padding: 0 1rem;
+  }
+
+  .controls select {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    background: #fff;
+  }
+
+  .controls .updated {
+    font-size: 0.8rem;
+    color: #888;
+  }
+
+  .table-wrap {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 1rem 3rem;
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    font-size: 0.85rem;
+  }
+
+  thead th {
+    background: #1a1a2e;
+    color: #aab;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+    padding: 0.75rem 0.6rem;
+    text-align: right;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+  }
+
+  thead th:first-child,
+  thead th:nth-child(2) {
+    text-align: left;
+  }
+
+  thead th:hover { color: #56d6d6; }
+
+  thead th .arrow {
+    font-size: 0.6rem;
+    margin-left: 3px;
+    opacity: 0.4;
+  }
+
+  thead th.sort-active .arrow { opacity: 1; color: #56d6d6; }
+
+  tbody td {
+    padding: 0.6rem 0.6rem;
+    text-align: right;
+    border-bottom: 1px solid #f0f0f0;
+    white-space: nowrap;
+  }
+
+  tbody td:first-child {
+    text-align: center;
+    color: #888;
+    font-weight: 600;
+    width: 40px;
+  }
+
+  tbody td:nth-child(2) {
+    text-align: left;
+    font-weight: 700;
+    min-width: 60px;
+  }
+
+  tbody tr:hover { background: #f8f9ff; }
+
+  tbody tr:last-child td { border-bottom: none; }
+
+  .loading {
+    text-align: center;
+    padding: 3rem;
+    color: #888;
+    font-size: 1rem;
+  }
+
+  .epa-cell {
+    font-weight: 600;
+    border-radius: 3px;
+    padding: 0.35rem 0.5rem;
+  }
+
+  footer {
+    background: #1a1a2e;
+    color: #666;
+    text-align: center;
+    padding: 2rem;
+    font-size: 0.8rem;
+  }
+
+  footer a { color: #56d6d6; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="label">Teams</div>
+  <h1>Statistics</h1>
+  <div style="display:flex;justify-content:center;gap:1.5rem;margin-top:1rem;font-size:0.85rem">
+    <a href="/static/teams.html" style="color:#56d6d6;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Teams</a>
+    <a href="/static/leaderboard.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Players</a>
+  </div>
+  <nav>
+    <button id="btn-offensive" class="active" onclick="switchSide('offensive')">Offensive</button>
+    <button id="btn-defensive" onclick="switchSide('defensive')">Defensive</button>
+  </nav>
+</header>
+
+<div class="controls">
+  <div>
+    <label for="season-select">Season: </label>
+    <select id="season-select" onchange="loadData()"></select>
+  </div>
+  <div class="updated" id="update-info"></div>
+</div>
+
+<div class="table-wrap">
+  <div class="loading" id="loading">Loading...</div>
+  <table id="stats-table" style="display:none">
+    <thead>
+      <tr id="header-row"></tr>
+    </thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<footer>
+  <p>ISFL EPA &mdash; <a href="/static/leaderboard.html">Player Leaderboard</a> | <a href="/docs">API Docs</a></p>
+</footer>
+
+<script>
+const COLUMNS = [
+  { key: "rank",        label: "#",           fmt: "int",  align: "center", epa: false },
+  { key: "team",        label: "Team",        fmt: "str",  align: "left",   epa: false },
+  { key: "epa_per_play",label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
+  { key: "total_epa",   label: "Total EPA",   fmt: "dec2", align: "right",  epa: true, ranked: true },
+  { key: "success_pct", label: "Success %",   fmt: "pct1", align: "right",  epa: false },
+  { key: "epa_per_pass",label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true  },
+  { key: "epa_per_rush",label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true  },
+  { key: "pass_yards",  label: "Pass Yards",  fmt: "int",  align: "right",  epa: false },
+  { key: "comp_pct",    label: "Comp %",      fmt: "pct1", align: "right",  epa: false },
+  { key: "pass_td",     label: "Pass TD",     fmt: "int",  align: "right",  epa: false },
+  { key: "rush_yards",  label: "Rush Yards",  fmt: "int",  align: "right",  epa: false },
+  { key: "rush_td",     label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
+  { key: "sack_pct",    label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
+  { key: "int_pct",     label: "Int %",       fmt: "pct1", align: "right",  epa: false },
+];
+
+let currentData = [];
+let currentSide = "offensive";
+let sortKey = "epa_per_play";
+let sortAsc = false;
+
+function formatVal(val, fmt) {
+  if (val == null || val === undefined) return "-";
+  switch (fmt) {
+    case "str":  return val;
+    case "int":  return Number(val).toLocaleString();
+    case "dec2": return Number(val).toFixed(2);
+    case "dec3": return Number(val).toFixed(3);
+    case "pct1": return Number(val).toFixed(1) + "%";
+    default:     return String(val);
+  }
+}
+
+function epaColor(val, minVal, maxVal, mid, invert) {
+  if (val == null) return "";
+  const diff = val - mid;
+  if (diff === 0) return "";
+  const halfRange = (maxVal - minVal) / 2 || 1;
+  const intensity = Math.min(Math.abs(diff) / halfRange, 1);
+  const l = 95 - intensity * 35;
+  const s = 40 + intensity * 30;
+  const isGood = invert ? diff < 0 : diff > 0;
+  return isGood ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+function rankedColor(val, minVal, maxVal, mid, invert) {
+  if (val == null) return "";
+  const diff = val - mid;
+  if (diff === 0) return "";
+  const halfRange = (maxVal - minVal) / 2 || 1;
+  const intensity = Math.min(Math.abs(diff) / halfRange, 1);
+  const isGood = invert ? diff < 0 : diff > 0;
+  const l = 95 - intensity * 35;
+  const s = 40 + intensity * 30;
+  return isGood ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+function buildHeaders() {
+  const row = document.getElementById("header-row");
+  row.innerHTML = "";
+  COLUMNS.forEach(col => {
+    const th = document.createElement("th");
+    th.dataset.key = col.key;
+    th.style.textAlign = col.align;
+    const isActive = col.key === sortKey;
+    if (isActive) th.classList.add("sort-active");
+    const arrow = isActive ? (sortAsc ? " \u25B2" : " \u25BC") : " \u25BC";
+    th.innerHTML = col.label + `<span class="arrow">${arrow}</span>`;
+    if (col.key !== "rank") {
+      th.onclick = () => {
+        if (sortKey === col.key) {
+          sortAsc = !sortAsc;
+        } else {
+          sortKey = col.key;
+          // Default sort direction: descending for most, ascending for defensive EPA columns
+          sortAsc = false;
+        }
+        renderTable();
+      };
+    }
+    row.appendChild(th);
+  });
+}
+
+function renderTable() {
+  // Sort data
+  const data = [...currentData];
+  data.sort((a, b) => {
+    let va = a[sortKey], vb = b[sortKey];
+    if (typeof va === "string") {
+      return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    }
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  // Re-rank
+  data.forEach((d, i) => d.rank = i + 1);
+
+  // Compute min/max/midpoint for EPA columns
+  const epaRanges = {};
+  COLUMNS.filter(c => c.epa).forEach(col => {
+    const vals = data.map(d => d[col.key]).filter(v => v != null);
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    epaRanges[col.key] = { min, max, midpoint: (min + max) / 2 };
+  });
+
+  // Build headers with sort indicator
+  buildHeaders();
+
+  // Build rows
+  const tbody = document.getElementById("table-body");
+  tbody.innerHTML = "";
+  data.forEach(row => {
+    const tr = document.createElement("tr");
+    COLUMNS.forEach(col => {
+      const td = document.createElement("td");
+      td.style.textAlign = col.align;
+      td.textContent = formatVal(row[col.key], col.fmt);
+      if (col.epa) {
+        td.classList.add("epa-cell");
+        const range = epaRanges[col.key];
+        let bg;
+        if (col.ranked) {
+          const invert = currentSide === "defensive";
+          bg = rankedColor(row[col.key], range.min, range.max, range.midpoint, invert);
+        } else {
+          const invert = currentSide === "defensive";
+          bg = epaColor(row[col.key], range.min, range.max, range.midpoint, invert);
+        }
+        if (bg) td.style.backgroundColor = bg;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("stats-table").style.display = "";
+  document.getElementById("loading").style.display = "none";
+}
+
+function switchSide(side) {
+  currentSide = side;
+  document.getElementById("btn-offensive").classList.toggle("active", side === "offensive");
+  document.getElementById("btn-defensive").classList.toggle("active", side === "defensive");
+  sortKey = "epa_per_play";
+  sortAsc = side === "defensive";
+  loadData();
+}
+
+async function loadData() {
+  const season = document.getElementById("season-select").value;
+  if (!season) return;
+
+  document.getElementById("loading").style.display = "";
+  document.getElementById("stats-table").style.display = "none";
+
+  try {
+    const resp = await fetch(`/epa/team-dashboard?season=${season}&side=${currentSide}`);
+    currentData = await resp.json();
+    renderTable();
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error loading data: " + e.message;
+  }
+}
+
+async function init() {
+  try {
+    const resp = await fetch("/epa/seasons");
+    const seasons = await resp.json();
+    const sel = document.getElementById("season-select");
+    seasons.forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = `Season ${s}`;
+      sel.appendChild(opt);
+    });
+    if (seasons.length > 0) {
+      sel.value = seasons[0];
+      loadData();
+    } else {
+      document.getElementById("loading").textContent = "No EPA data available. Run compute-epa first.";
+    }
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error connecting to API: " + e.message;
+  }
+}
+
+init();
+</script>
+</body>
+</html>

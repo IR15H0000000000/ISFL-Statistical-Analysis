@@ -9,11 +9,14 @@ Both predict P(next_score_type | game_state), then EP = sum(P_i * points_i).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
@@ -182,7 +185,11 @@ class EPModel:
     @classmethod
     def load(cls, path: Path = DEFAULT_MODEL_PATH) -> EPModel:
         """Load a previously trained model."""
-        data = joblib.load(path)
+        try:
+            data = joblib.load(path)
+        except Exception as exc:
+            logger.error("Failed to load model from %s: %s", path, exc)
+            raise ValueError(f"Corrupt or incompatible model file: {path}") from exc
         ep = cls(
             model=data["model"],
             scaler=data.get("scaler"),

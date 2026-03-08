@@ -1,6 +1,6 @@
 """Stats query endpoints."""
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import desc, func, select
 
 from isfl_epa.storage.database import (
@@ -121,7 +121,7 @@ def player_game_log(
     }
     table = table_map.get(category)
     if table is None:
-        return {"error": f"Unknown category: {category}"}
+        raise HTTPException(status_code=400, detail=f"Unknown category: {category}")
 
     engine = request.app.state.engine
     stmt = select(table).where(table.c.player_id == player_id)

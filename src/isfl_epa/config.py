@@ -69,6 +69,12 @@ def get_boxscore_file_num(game_id: int) -> int:
     return (game_id % BOXSCORE_FILES_PER_SEASON) + 1
 
 
+def get_roster_url(league: League, season: int, team_id: int) -> str:
+    """URL for a team roster page."""
+    prefix = get_season_prefix(league, season)
+    return f"{BASE_URL}/{prefix}/Teams/{team_id}.html"
+
+
 def get_pbp_html_url(league: League, season: int, game_id: int) -> str:
     """URL for individual HTML PBP page (S1-26, 2016 engine)."""
     prefix = get_season_prefix(league, season)

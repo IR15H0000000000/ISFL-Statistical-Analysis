@@ -549,5 +549,146 @@ def epa_stats(
             console.print(table)
 
 
+@app.command()
+def scrape_rosters(
+    league: League = typer.Option(League.ISFL, help="League"),
+    season: int = typer.Option(None, help="Single season to scrape"),
+    season_range: str = typer.Option(None, help="Season range, e.g. '1-59'"),
+    force_refresh: bool = typer.Option(False, help="Re-download even if cached"),
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Scrape team roster pages and load player positions into the database."""
+    from sqlalchemy import select
+
+    from isfl_epa.scraper.roster import fetch_season_rosters, match_roster_to_players
+    from isfl_epa.storage.database import (
+        create_tables,
+        get_engine,
+        load_player_positions,
+        player_names_table,
+    )
+
+    if season is None and season_range is None:
+        console.print("[red]Provide --season or --season-range[/red]")
+        raise typer.Exit(1)
+
+    if season_range:
+        parts = season_range.split("-")
+        seasons = list(range(int(parts[0]), int(parts[1]) + 1))
+    else:
+        seasons = [season]
+
+    engine = get_engine(database_url)
+    create_tables(engine)
+
+    total_matched = 0
+    total_unmatched = 0
+
+    for s in seasons:
+        console.print(f"Scraping {league.value} S{s} rosters...")
+        roster = fetch_season_rosters(league, s, force_refresh=force_refresh)
+        if not roster:
+            console.print(f"  [yellow]No roster data found[/yellow]")
+            continue
+
+        console.print(f"  Found {len(roster)} players across all teams")
+
+        # Load player_names for this season to match against
+        with engine.connect() as conn:
+            pn_rows = conn.execute(
+                select(player_names_table).where(player_names_table.c.season == s)
+            ).fetchall()
+
+        player_names = [
+            {"player_id": r.player_id, "name": r.name, "team": r.team}
+            for r in pn_rows
+        ]
+
+        # Match roster names to player IDs
+        roster = match_roster_to_players(roster, player_names)
+
+        # Add team abbreviation from player_names if available
+        # Build lookup: player_id -> team
+        pid_team = {r.player_id: r.team for r in pn_rows if r.team}
+        for entry in roster:
+            if entry.get("player_id") and not entry.get("team"):
+                entry["team"] = pid_team.get(entry["player_id"])
+
+        result = load_player_positions(engine, roster, s)
+        console.print(f"  Matched: {result['matched']}, Unmatched: {result['unmatched']}")
+        total_matched += result["matched"]
+        total_unmatched += result["unmatched"]
+
+    console.print(f"\n[bold]Total: {total_matched} matched, {total_unmatched} unmatched[/bold]")
+    console.print("[green]Done![/green]")
+
+
+@app.command("detect-duplicates")
+def detect_duplicates():
+    """Detect players with duplicate IDs (same normalized name, different player_ids)."""
+    from rich.table import Table
+
+    from isfl_epa.storage.database import find_duplicate_players, get_engine
+
+    engine = get_engine()
+    duplicates = find_duplicate_players(engine)
+
+    if not duplicates:
+        console.print("[green]No duplicate players found![/green]")
+        return
+
+    table = Table(title=f"Duplicate Players ({len(duplicates)} groups)")
+    table.add_column("Normalized Name", style="cyan")
+    table.add_column("Keep ID", style="green")
+    table.add_column("Remove IDs", style="red")
+    table.add_column("Raw Names")
+
+    for d in duplicates:
+        table.add_row(
+            d["normalized_name"],
+            str(d["keep_id"]),
+            ", ".join(str(x) for x in d["remove_ids"]),
+            " | ".join(d["names"]),
+        )
+
+    console.print(table)
+    total_removals = sum(len(d["remove_ids"]) for d in duplicates)
+    console.print(f"\n[bold]{total_removals} player IDs to merge across {len(duplicates)} groups[/bold]")
+
+
+@app.command("merge-duplicates")
+def merge_duplicates(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview merges without executing"),
+):
+    """Merge duplicate player IDs into canonical entries."""
+    from isfl_epa.storage.database import find_duplicate_players, get_engine, merge_players_db
+
+    engine = get_engine()
+    duplicates = find_duplicate_players(engine)
+
+    if not duplicates:
+        console.print("[green]No duplicate players found![/green]")
+        return
+
+    # Build list of (keep_id, remove_id) pairs
+    merge_pairs = []
+    for d in duplicates:
+        keep_id = d["keep_id"]
+        for remove_id in d["remove_ids"]:
+            merge_pairs.append((keep_id, remove_id))
+
+    if dry_run:
+        for keep_id, remove_id in merge_pairs[:20]:
+            console.print(f"  [dim]Would merge {remove_id} → {keep_id}[/dim]")
+        if len(merge_pairs) > 20:
+            console.print(f"  [dim]... and {len(merge_pairs) - 20} more[/dim]")
+        console.print(f"\n[bold yellow]Dry run: {len(merge_pairs)} merges would be performed[/bold yellow]")
+    else:
+        console.print(f"Merging {len(merge_pairs)} duplicate player IDs...")
+        count = merge_players_db(engine, merge_pairs)
+        console.print(f"\n[bold green]{count} merges completed[/bold green]")
+        console.print("[dim]Re-run build + compute-epa for affected seasons to regenerate stats[/dim]")
+
+
 if __name__ == "__main__":
     app()

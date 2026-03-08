@@ -1,6 +1,6 @@
 """Player query endpoints."""
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import func, select
 
 from isfl_epa.storage.database import (
@@ -64,7 +64,7 @@ def get_player(request: Request, player_id: int):
             select(players_table).where(players_table.c.player_id == player_id)
         ).first()
         if not player:
-            return {"error": "Player not found"}
+            raise HTTPException(status_code=404, detail="Player not found")
 
         # Aliases
         aliases = conn.execute(

@@ -23,7 +23,7 @@ This project:
 | 1. Data Extraction | Done | Scraper, decompression, caching for both engine eras |
 | 2. Play Parsing | Done | Regex-based parser — ~100% parse rate, cross-validated against boxscores |
 | 3. Stats Aggregation | Done | Player/team stats, player registry, PostgreSQL + Parquet storage, FastAPI |
-| 4. EPA Model | Not started | Expected points model + EPA/play |
+| 4. EPA Model | Done | Expected points model, EPA/play, per-player/team aggregation, API |
 
 ## Parsed Data Summary
 
@@ -162,6 +162,19 @@ uv run isfl-epa stats --season 50 --stat team --output data/processed/team_s50.c
 uv run isfl-epa summary
 uv run isfl-epa summary --season 50
 
+# Train era-specific EP models (drive-outcome regression)
+uv run isfl-epa train-ep --era both
+
+# Train with a specific model type (hgb_reg, hgb, or logistic)
+uv run isfl-epa train-ep --era both --model-type hgb_reg
+
+# Compute EPA for a season
+uv run isfl-epa compute-epa --season 50
+
+# View EPA leaders
+uv run isfl-epa epa-stats --season 50 --stat passing --top 10
+uv run isfl-epa epa-stats --season 50 --stat team
+
 # Look up a player
 uv run isfl-epa player --name "Patterson, J."
 uv run isfl-epa player --id 42
@@ -244,7 +257,12 @@ src/isfl_epa/
   api/
     app.py           # FastAPI application
     routes/          # API endpoints (plays, stats, players)
-  epa/               # (Phase 4) Expected points model + EPA calculation
+  epa/
+    score_reconstruct.py # Reconstruct S1-26 per-play scores from scoring events
+    dataset.py         # Drive-outcome labeling, feature matrix for EP model
+    model.py           # EPModel: train, predict, save/load (HGB regressor + classifier)
+    calculator.py      # EPA computation via next-play lookahead (drive + half-score modes)
+    models.py          # Pydantic models (PlayEPA, PlayerEPASeason, TeamEPASeason)
 tests/
   test_parser.py              # 46 unit tests covering all play types and edge cases
   cross_validate_test.py      # 16 tests cross-validating parsed stats vs boxscores
@@ -253,6 +271,7 @@ tests/
   registry_test.py            # 14 tests for player registry
   storage_test.py             # Parquet + PostgreSQL round-trip tests
   api_test.py                 # 11 FastAPI endpoint tests
+  epa_test.py                 # 44 tests for EPA pipeline (drive labeling, model, calculator)
 notebooks/
   01_data_exploration.ipynb  # Raw data exploration
 data/
@@ -310,12 +329,51 @@ When running via Docker Compose, the FastAPI server provides:
 | `GET /players/?name=&season=` | Search players |
 | `GET /players/{id}` | Player profile with career stats |
 | `GET /players/{id}/plays` | All plays involving a player |
+| `GET /epa/passing-leaders?season=&top=&min_dropbacks=` | EPA passing leaders |
+| `GET /epa/rushing-leaders?season=&top=&min_attempts=` | EPA rushing leaders |
+| `GET /epa/receiving-leaders?season=&top=&min_targets=` | EPA receiving leaders |
+| `GET /epa/defensive-leaders?season=&top=&min_plays=` | EPA defensive leaders |
+| `GET /epa/team?season=` | Team EPA rankings |
+| `GET /epa/team-dashboard?season=&side=` | Team dashboard (offensive/defensive) |
+| `GET /epa/player/{id}?season=` | Player EPA profile |
+| `GET /epa/game/{game_id}` | Play-level EPA for a game |
+| `GET /epa/leaderboard?category=&season=&mode=` | Player leaderboard with EPA + traditional stats |
+| `GET /epa/seasons` | Seasons with EPA data |
+| `GET /epa/teams?season=` | Teams, optionally filtered by season |
+| `GET /epa/positions` | Distinct player positions |
 
 Full OpenAPI docs at `http://localhost:8000/docs`.
 
-## Roadmap
+## EPA Model
 
-### Phase 4: EPA Model
-- Train an Expected Points model on historical ISFL data (separate from NFL — different sim distributions)
-- Calculate EPA per play: `EPA = EP_after - EP_before`
-- Aggregate EPA/play per team and player (passer EPA/dropback, rusher EPA/carry, etc.)
+The EPA (Expected Points Added) model quantifies the value of every play beyond traditional counting stats.
+
+### Methodology
+
+1. **Drive-outcome labeling**: Each play is labeled with the actual points scored on its current drive. Drive boundaries are detected by possession changes, half changes, and scoring events. Point values use actual outcomes:
+   - TD + PAT good: **+7** | TD + PAT miss: **+6**
+   - Defensive TD (pick-6, fumble-return TD) + PAT good: **-7** | + PAT miss: **-6**
+   - Field goal: **+3** | Safety: **-2**
+   - All other drive endings (punt, turnover, end of half, missed FG, turnover on downs): **0**
+
+2. **EP model**: A `HistGradientBoostingRegressor` directly predicts expected points from game state. Trained on drive-start plays only for better calibration at drive boundaries. Two era-specific models handle engine differences:
+   - **S1–26 model** (2016 engine) → `data/models/ep_model_2016.joblib`
+   - **S27–59 model** (2022 engine) → `data/models/ep_model_2022.joblib`
+
+3. **Features** (7 per era): down, distance, yardline_100, score_differential, half_seconds_remaining, is_home, is_overtime
+
+4. **EPA calculation**: Uses next-play lookahead: `EPA = EP_after - EP_before`.
+   - **Scrimmage plays only**: pass, rush, sack, field_goal (kickoffs, punts, penalties, kneels, spikes are excluded)
+   - **Scoring plays**: TD = ±(6 + pat_bonus), FG = +3, safety = -2
+   - **Possession change**: EP_after = 0 (drive ended without scoring)
+   - **Same drive**: EP_after = next play's EP_before (ensures EPA telescopes correctly: total drive EPA = drive_outcome - EP_first_play)
+   - **Defensive TDs**: pick-6 and fumble-return TDs produce negative EP_after with actual PAT results
+
+5. **Score reconstruction**: S1-26 HTML-era games lack per-play scores. These are reconstructed from scoring events (TDs, FGs, safeties, PATs) detected during parsing.
+
+### Training
+
+- **Train set**: S1-23 + S27-56 (both engine eras, drive-start plays only)
+- **Test set**: S24-26 + S57-59 (holdout from each era)
+- Era-specific models avoid the need for an `engine_era` feature
+- Mean EPA per game ≈ -0.04 (near zero, confirming proper calibration)

@@ -12,6 +12,7 @@ The registry can operate in two modes:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -20,8 +21,17 @@ _OVERRIDES_PATH = Path(__file__).parent / "overrides.yaml"
 
 
 def _normalize(name: str) -> str:
-    """Normalize a player name for matching."""
-    return name.strip().lower()
+    """Normalize a player name for matching.
+
+    Strips trailing dots, normalizes whitespace around commas,
+    and lowercases. This ensures 'Smith, J.' and 'Smith, J'
+    map to the same key.
+    """
+    s = name.strip().lower()
+    s = s.rstrip(".")
+    s = re.sub(r"\s*,\s*", ", ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
 class PlayerRegistry:

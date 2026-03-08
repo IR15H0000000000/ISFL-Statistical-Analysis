@@ -58,3 +58,17 @@ def read_season_plays(season: int, league: str) -> pd.DataFrame:
     """Read a season's plays from Parquet."""
     path = DATA_DIR / f"{league}_S{season}_plays.parquet"
     return pd.read_parquet(path)
+
+
+def write_epa_results(epa_df: pd.DataFrame, season: int, league: str) -> Path:
+    """Write EPA results to Parquet."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = DATA_DIR / f"{league}_S{season}_epa.parquet"
+    epa_df.to_parquet(path, index=False)
+    return path
+
+
+def read_epa_results(season: int, league: str) -> pd.DataFrame:
+    """Read a season's EPA results from Parquet."""
+    path = DATA_DIR / f"{league}_S{season}_epa.parquet"
+    return pd.read_parquet(path)

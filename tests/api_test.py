@@ -13,6 +13,10 @@ from isfl_epa.storage.database import (
     load_registry,
     load_season,
     metadata,
+    play_epa_table,
+    player_season_epa_table,
+    team_season_epa_table,
+    plays_table,
 )
 
 
@@ -70,6 +74,36 @@ def client():
     registry.build_from_games([game])
     load_registry(engine, registry)
     load_season(engine, [game], registry)
+
+    # Seed EPA data for EPA endpoint tests
+    from sqlalchemy import insert, select
+    with engine.begin() as conn:
+        # Get play IDs
+        play_rows = conn.execute(select(plays_table.c.id, plays_table.c.game_id).order_by(plays_table.c.id)).fetchall()
+        for i, play_row in enumerate(play_rows):
+            conn.execute(insert(play_epa_table).values(
+                play_id=play_row.id, game_id=play_row.game_id, season=50,
+                ep_before=1.5 - i * 0.5, ep_after=1.0 - i * 0.3, epa=-0.5 + i * 0.2,
+            ))
+
+        # Player EPA
+        players_resp = conn.execute(select(plays_table.c.player_id_passer).where(plays_table.c.player_id_passer.isnot(None)).distinct()).fetchall()
+        passer_id = players_resp[0][0] if players_resp else 1
+        conn.execute(insert(player_season_epa_table).values(
+            player_id=passer_id, player="QB, A.", team="HOM", season=50,
+            pass_epa=5.0, dropbacks=150, epa_per_dropback=0.033,
+            rush_epa=1.0, rush_attempts=20, epa_per_rush=0.05,
+        ))
+
+        # Team EPA
+        conn.execute(insert(team_season_epa_table).values(
+            team="HOM", season=50, total_epa=10.0, pass_epa=7.0, rush_epa=3.0,
+            plays=200, epa_per_play=0.05,
+        ))
+        conn.execute(insert(team_season_epa_table).values(
+            team="AWY", season=50, total_epa=-5.0, pass_epa=-3.0, rush_epa=-2.0,
+            plays=180, epa_per_play=-0.028,
+        ))
 
     # Replace lifespan to use our test engine instead of Postgres
     @asynccontextmanager
@@ -164,3 +198,93 @@ class TestPlayersEndpoints:
         resp = client.get(f"/players/{pid}/plays")
         assert resp.status_code == 200
         assert len(resp.json()) >= 2  # 2 pass plays
+
+    def test_player_not_found(self, client):
+        resp = client.get("/players/999999")
+        assert resp.status_code == 404
+
+
+class TestEpaEndpoints:
+    def test_passing_leaders(self, client):
+        resp = client.get("/epa/passing-leaders?season=50&min_dropbacks=1")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) >= 1
+        assert data[0]["player"] == "QB, A."
+
+    def test_rushing_leaders(self, client):
+        resp = client.get("/epa/rushing-leaders?season=50&min_attempts=1")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) >= 1
+
+    def test_receiving_leaders_empty(self, client):
+        resp = client.get("/epa/receiving-leaders?season=50&min_targets=1")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_team_epa(self, client):
+        resp = client.get("/epa/team?season=50")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        # Sorted by epa_per_play desc
+        assert data[0]["team"] == "HOM"
+
+    def test_player_epa_profile(self, client):
+        players = client.get("/players/?name=QB").json()
+        pid = players[0]["player_id"]
+        resp = client.get(f"/epa/player/{pid}?season=50")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) >= 1
+        assert data[0]["pass_epa"] == 5.0
+
+    def test_game_epa(self, client):
+        resp = client.get("/epa/game/1000")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3  # 3 plays
+        # At least some should have EPA
+        assert any(row["epa"] is not None for row in data)
+
+    def test_available_seasons(self, client):
+        resp = client.get("/epa/seasons")
+        assert resp.status_code == 200
+        assert 50 in resp.json()
+
+    def test_available_teams(self, client):
+        resp = client.get("/epa/teams?season=50")
+        assert resp.status_code == 200
+        teams = resp.json()
+        assert "HOM" in teams
+        assert "AWY" in teams
+
+    def test_available_teams_no_season(self, client):
+        resp = client.get("/epa/teams")
+        assert resp.status_code == 200
+
+    def test_team_dashboard_offensive(self, client):
+        resp = client.get("/epa/team-dashboard?season=50&side=offensive")
+        assert resp.status_code == 200
+
+    def test_team_dashboard_defensive(self, client):
+        resp = client.get("/epa/team-dashboard?season=50&side=defensive")
+        assert resp.status_code == 200
+
+    def test_leaderboard_passing(self, client):
+        resp = client.get("/epa/leaderboard?category=passing&season=50&min_plays=1")
+        assert resp.status_code == 200
+
+    def test_positions(self, client):
+        resp = client.get("/epa/positions")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+
+class TestErrorResponses:
+    def test_unknown_stat_category(self, client):
+        players = client.get("/players/?name=QB").json()
+        pid = players[0]["player_id"]
+        resp = client.get(f"/stats/player/{pid}/game-log?category=invalid")
+        assert resp.status_code == 400

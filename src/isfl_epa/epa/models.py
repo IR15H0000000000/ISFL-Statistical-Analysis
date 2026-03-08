@@ -38,6 +38,10 @@ class PlayerEPASeason(BaseModel):
     recv_epa: float = 0.0
     targets: int = 0
     epa_per_target: float = 0.0
+    # Defensive
+    def_epa: float = 0.0
+    def_plays: int = 0
+    epa_per_def_play: float = 0.0
 
 
 class TeamEPASeason(BaseModel):

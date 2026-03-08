@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISFL Player Leaderboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a2e;
+  }
+
+  header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 2rem 2rem 1.5rem;
+    text-align: center;
+  }
+
+  header .label {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    color: #56d6d6;
+    margin-bottom: 0.5rem;
+  }
+
+  header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .header-nav {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+  }
+
+  .header-nav a {
+    color: #8888aa;
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    transition: color 0.2s;
+  }
+  .header-nav a:hover { color: #ccc; }
+  .header-nav a.active { color: #56d6d6; }
+
+  nav {
+    display: flex;
+    justify-content: center;
+    gap: 0;
+    margin-top: 1.5rem;
+  }
+
+  nav button {
+    padding: 0.6rem 1.5rem;
+    border: 1px solid #3a3a5e;
+    background: transparent;
+    color: #8888aa;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  nav button:first-child { border-radius: 4px 0 0 4px; }
+  nav button:last-child { border-radius: 0 4px 4px 0; }
+
+  nav button.active {
+    background: #56d6d6;
+    color: #1a1a2e;
+    border-color: #56d6d6;
+  }
+
+  nav button:hover:not(.active) {
+    background: #2a2a4e;
+    color: #ccc;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    max-width: 1400px;
+    margin: 1.5rem auto 0.75rem;
+    padding: 0 1rem;
+  }
+
+  .controls select, .controls input {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    background: #fff;
+  }
+
+  .controls input[type="number"] { width: 80px; }
+
+  .controls label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #666;
+    margin-right: 0.25rem;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 0;
+  }
+
+  .mode-toggle button {
+    padding: 0.45rem 1rem;
+    border: 1px solid #ccc;
+    background: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: #666;
+  }
+  .mode-toggle button:first-child { border-radius: 4px 0 0 4px; }
+  .mode-toggle button:last-child { border-radius: 0 4px 4px 0; }
+  .mode-toggle button.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
+
+  .table-wrap {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 1rem 3rem;
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    font-size: 0.85rem;
+  }
+
+  thead th {
+    background: #1a1a2e;
+    color: #aab;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+    padding: 0.75rem 0.6rem;
+    text-align: right;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  thead th:first-child,
+  thead th:nth-child(2),
+  thead th:nth-child(3),
+  thead th:nth-child(4) {
+    text-align: left;
+  }
+
+  thead th:hover { color: #56d6d6; }
+
+  thead th .arrow {
+    font-size: 0.6rem;
+    margin-left: 3px;
+    opacity: 0.4;
+  }
+
+  thead th.sort-active .arrow { opacity: 1; color: #56d6d6; }
+
+  tbody td {
+    padding: 0.6rem 0.6rem;
+    text-align: right;
+    border-bottom: 1px solid #f0f0f0;
+    white-space: nowrap;
+  }
+
+  tbody td:first-child {
+    text-align: center;
+    color: #888;
+    font-weight: 600;
+    width: 40px;
+  }
+
+  tbody td:nth-child(2) {
+    text-align: left;
+    font-weight: 700;
+    min-width: 120px;
+  }
+
+  tbody td:nth-child(3),
+  tbody td:nth-child(4) {
+    text-align: left;
+  }
+
+  tbody tr:hover { background: #f8f9ff; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .loading {
+    text-align: center;
+    padding: 3rem;
+    color: #888;
+    font-size: 1rem;
+  }
+
+  .epa-cell {
+    font-weight: 600;
+    border-radius: 3px;
+    padding: 0.35rem 0.5rem;
+  }
+
+  footer {
+    background: #1a1a2e;
+    color: #666;
+    text-align: center;
+    padding: 2rem;
+    font-size: 0.8rem;
+  }
+
+  footer a { color: #56d6d6; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="label">Players</div>
+  <h1>Leaderboard</h1>
+  <div class="header-nav">
+    <a href="/static/teams.html">Teams</a>
+    <a href="/static/leaderboard.html" class="active">Players</a>
+  </div>
+  <nav>
+    <button id="btn-passing" class="active" onclick="switchCategory('passing')">Passing</button>
+    <button id="btn-rushing" onclick="switchCategory('rushing')">Rushing</button>
+    <button id="btn-receiving" onclick="switchCategory('receiving')">Receiving</button>
+    <button id="btn-defense" onclick="switchCategory('defense')">Defense</button>
+  </nav>
+</header>
+
+<div class="controls">
+  <div class="mode-toggle">
+    <button id="mode-season" class="active" onclick="switchMode('season')">Season</button>
+    <button id="mode-alltime" onclick="switchMode('alltime')">All-Time</button>
+  </div>
+
+  <div class="control-group" id="season-single-ctrl">
+    <label for="season-select">Season:</label>
+    <select id="season-select" onchange="loadData()"></select>
+  </div>
+
+  <div class="control-group" id="season-range-ctrl" style="display:none">
+    <label>From:</label>
+    <select id="season-min" onchange="loadData()"></select>
+    <label>To:</label>
+    <select id="season-max" onchange="loadData()"></select>
+  </div>
+
+  <div class="control-group" id="view-toggle-ctrl" style="display:none">
+    <div class="mode-toggle">
+      <button id="view-career" class="active" onclick="switchView('career')">Career</button>
+      <button id="view-seasons" onclick="switchView('seasons')">Seasons</button>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label for="team-select">Team:</label>
+    <select id="team-select" onchange="loadData()">
+      <option value="">All</option>
+    </select>
+  </div>
+
+  <div class="control-group">
+    <label for="pos-select">Pos:</label>
+    <select id="pos-select" onchange="loadData()">
+      <option value="">All</option>
+    </select>
+  </div>
+
+  <div class="control-group">
+    <label for="min-plays">Min:</label>
+    <input type="number" id="min-plays" onchange="loadData()">
+  </div>
+</div>
+
+<div class="table-wrap">
+  <div class="loading" id="loading">Loading...</div>
+  <table id="stats-table" style="display:none">
+    <thead>
+      <tr id="header-row"></tr>
+    </thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<footer>
+  <p>ISFL EPA &mdash; <a href="/static/teams.html">Team Stats</a> | <a href="/docs">API Docs</a></p>
+</footer>
+
+<script>
+const COLUMNS_PASSING = [
+  { key: "rank",            label: "#",       fmt: "int",  align: "center", epa: false },
+  { key: "player",          label: "Player",  fmt: "str",  align: "left",   epa: false },
+  { key: "team",            label: "Team",    fmt: "str",  align: "left",   epa: false },
+  { key: "position",        label: "Pos",     fmt: "str",  align: "left",   epa: false },
+  { key: "games",           label: "G",       fmt: "int",  align: "right",  epa: false },
+  { key: "comp",            label: "Cmp",     fmt: "int",  align: "right",  epa: false },
+  { key: "att",             label: "Att",     fmt: "int",  align: "right",  epa: false },
+  { key: "comp_pct",        label: "Cmp%",    fmt: "pct1", align: "right",  epa: false },
+  { key: "yards",           label: "Yds",     fmt: "int",  align: "right",  epa: false },
+  { key: "yards_per_att",   label: "Y/A",     fmt: "dec1", align: "right",  epa: false },
+  { key: "td",              label: "TD",      fmt: "int",  align: "right",  epa: false },
+  { key: "interceptions",   label: "INT",     fmt: "int",  align: "right",  epa: false },
+  { key: "sacks",           label: "Sck",     fmt: "int",  align: "right",  epa: false },
+  { key: "pass_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "dropbacks",       label: "DB",      fmt: "int",  align: "right",  epa: false },
+  { key: "epa_per_dropback",label: "EPA/DB",  fmt: "dec3", align: "right",  epa: true, ranked: true },
+];
+
+const COLUMNS_RUSHING = [
+  { key: "rank",            label: "#",       fmt: "int",  align: "center", epa: false },
+  { key: "player",          label: "Player",  fmt: "str",  align: "left",   epa: false },
+  { key: "team",            label: "Team",    fmt: "str",  align: "left",   epa: false },
+  { key: "position",        label: "Pos",     fmt: "str",  align: "left",   epa: false },
+  { key: "games",           label: "G",       fmt: "int",  align: "right",  epa: false },
+  { key: "att",             label: "Att",     fmt: "int",  align: "right",  epa: false },
+  { key: "yards",           label: "Yds",     fmt: "int",  align: "right",  epa: false },
+  { key: "yards_per_att",   label: "Y/A",     fmt: "dec1", align: "right",  epa: false },
+  { key: "td",              label: "TD",      fmt: "int",  align: "right",  epa: false },
+  { key: "fumbles",         label: "Fum",     fmt: "int",  align: "right",  epa: false },
+  { key: "rush_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "rush_attempts",   label: "Plays",   fmt: "int",  align: "right",  epa: false },
+  { key: "epa_per_rush",    label: "EPA/R",   fmt: "dec3", align: "right",  epa: true, ranked: true },
+];
+
+const COLUMNS_RECEIVING = [
+  { key: "rank",            label: "#",       fmt: "int",  align: "center", epa: false },
+  { key: "player",          label: "Player",  fmt: "str",  align: "left",   epa: false },
+  { key: "team",            label: "Team",    fmt: "str",  align: "left",   epa: false },
+  { key: "position",        label: "Pos",     fmt: "str",  align: "left",   epa: false },
+  { key: "games",           label: "G",       fmt: "int",  align: "right",  epa: false },
+  { key: "receptions",      label: "Rec",     fmt: "int",  align: "right",  epa: false },
+  { key: "targets",         label: "Tgt",     fmt: "int",  align: "right",  epa: false },
+  { key: "yards",           label: "Yds",     fmt: "int",  align: "right",  epa: false },
+  { key: "yards_per_rec",   label: "Y/R",     fmt: "dec1", align: "right",  epa: false },
+  { key: "td",              label: "TD",      fmt: "int",  align: "right",  epa: false },
+  { key: "fumbles",         label: "Fum",     fmt: "int",  align: "right",  epa: false },
+  { key: "recv_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "epa_per_target",  label: "EPA/T",   fmt: "dec3", align: "right",  epa: true, ranked: true },
+];
+
+const COLUMNS_DEFENSE = [
+  { key: "rank",            label: "#",       fmt: "int",  align: "center", epa: false },
+  { key: "player",          label: "Player",  fmt: "str",  align: "left",   epa: false },
+  { key: "team",            label: "Team",    fmt: "str",  align: "left",   epa: false },
+  { key: "position",        label: "Pos",     fmt: "str",  align: "left",   epa: false },
+  { key: "games",           label: "G",       fmt: "int",  align: "right",  epa: false },
+  { key: "tackles",         label: "Tkl",     fmt: "int",  align: "right",  epa: false },
+  { key: "sacks",           label: "Sck",     fmt: "dec1", align: "right",  epa: false },
+  { key: "interceptions",   label: "INT",     fmt: "int",  align: "right",  epa: false },
+  { key: "fumble_recoveries",label: "FR",     fmt: "int",  align: "right",  epa: false },
+  { key: "def_epa",         label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "def_plays",       label: "Plays",   fmt: "int",  align: "right",  epa: false },
+  { key: "epa_per_def_play",label: "EPA/P",   fmt: "dec3", align: "right",  epa: true, ranked: true },
+];
+
+const COLUMN_MAP = {
+  passing: COLUMNS_PASSING,
+  rushing: COLUMNS_RUSHING,
+  receiving: COLUMNS_RECEIVING,
+  defense: COLUMNS_DEFENSE,
+};
+
+const DEFAULT_SORT = {
+  passing: "epa_per_dropback",
+  rushing: "epa_per_rush",
+  receiving: "epa_per_target",
+  defense: "epa_per_def_play",
+};
+
+const DEFAULT_MIN = {
+  passing: 100,
+  rushing: 50,
+  receiving: 30,
+  defense: 50,
+};
+
+let currentCategory = "passing";
+let currentMode = "season"; // season, career, seasons
+let currentData = [];
+let sortKey = "epa_per_dropback";
+let sortAsc = false;
+let allSeasons = [];
+
+function getColumns() {
+  let cols = COLUMN_MAP[currentCategory];
+  if (currentMode !== "season" && document.getElementById("view-seasons").classList.contains("active")) {
+    // Add season column after position for "seasons" view
+    const hasSeason = cols.some(c => c.key === "season");
+    if (!hasSeason) {
+      cols = [...cols];
+      const posIdx = cols.findIndex(c => c.key === "position");
+      cols.splice(posIdx + 1, 0, { key: "season", label: "Season", fmt: "int", align: "right", epa: false });
+    }
+  }
+  return cols;
+}
+
+function formatVal(val, fmt) {
+  if (val == null || val === undefined) return "-";
+  switch (fmt) {
+    case "str":  return val;
+    case "int":  return Number(val).toLocaleString();
+    case "dec1": return Number(val).toFixed(1);
+    case "dec2": return Number(val).toFixed(2);
+    case "dec3": return Number(val).toFixed(3);
+    case "pct1": return Number(val).toFixed(1) + "%";
+    default:     return String(val);
+  }
+}
+
+function epaColor(val, minVal, maxVal, mid, invert) {
+  if (val == null) return "";
+  const diff = val - mid;
+  if (diff === 0) return "";
+  const halfRange = (maxVal - minVal) / 2 || 1;
+  const intensity = Math.min(Math.abs(diff) / halfRange, 1);
+  const l = 95 - intensity * 35;
+  const s = 40 + intensity * 30;
+  const isGood = invert ? diff < 0 : diff > 0;
+  return isGood ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+function rankedColor(val, minVal, maxVal, mid, invert) {
+  if (val == null) return "";
+  const diff = val - mid;
+  if (diff === 0) return "";
+  const halfRange = (maxVal - minVal) / 2 || 1;
+  const intensity = Math.min(Math.abs(diff) / halfRange, 1);
+  const isGood = invert ? diff < 0 : diff > 0;
+  const l = 95 - intensity * 35;
+  const s = 40 + intensity * 30;
+  return isGood ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+function buildHeaders() {
+  const columns = getColumns();
+  const row = document.getElementById("header-row");
+  row.innerHTML = "";
+  columns.forEach(col => {
+    const th = document.createElement("th");
+    th.dataset.key = col.key;
+    th.style.textAlign = col.align;
+    const isActive = col.key === sortKey;
+    if (isActive) th.classList.add("sort-active");
+    const arrow = isActive ? (sortAsc ? " \u25B2" : " \u25BC") : " \u25BC";
+    th.innerHTML = col.label + `<span class="arrow">${arrow}</span>`;
+    if (col.key !== "rank") {
+      th.onclick = () => {
+        if (sortKey === col.key) {
+          sortAsc = !sortAsc;
+        } else {
+          sortKey = col.key;
+          sortAsc = false;
+        }
+        renderTable();
+      };
+    }
+    row.appendChild(th);
+  });
+}
+
+function renderTable() {
+  const columns = getColumns();
+  const data = [...currentData];
+  data.sort((a, b) => {
+    let va = a[sortKey], vb = b[sortKey];
+    if (va == null) va = sortAsc ? Infinity : -Infinity;
+    if (vb == null) vb = sortAsc ? Infinity : -Infinity;
+    if (typeof va === "string") {
+      return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    }
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  data.forEach((d, i) => d.rank = i + 1);
+
+  // Compute min/max/midpoint for EPA columns
+  const epaRanges = {};
+  columns.filter(c => c.epa).forEach(col => {
+    const vals = data.map(d => d[col.key]).filter(v => v != null);
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    epaRanges[col.key] = { min, max, midpoint: (min + max) / 2 };
+  });
+
+  buildHeaders();
+
+  const tbody = document.getElementById("table-body");
+  tbody.innerHTML = "";
+  const isDefense = currentCategory === "defense";
+
+  data.forEach(row => {
+    const tr = document.createElement("tr");
+    columns.forEach(col => {
+      const td = document.createElement("td");
+      td.style.textAlign = col.align;
+      td.textContent = formatVal(row[col.key], col.fmt);
+      if (col.epa) {
+        td.classList.add("epa-cell");
+        const range = epaRanges[col.key];
+        let bg;
+        if (col.ranked) {
+          bg = rankedColor(row[col.key], range.min, range.max, range.midpoint, isDefense);
+        } else {
+          bg = epaColor(row[col.key], range.min, range.max, range.midpoint, isDefense);
+        }
+        if (bg) td.style.backgroundColor = bg;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("stats-table").style.display = "";
+  document.getElementById("loading").style.display = "none";
+}
+
+function switchCategory(cat) {
+  currentCategory = cat;
+  ["passing", "rushing", "receiving", "defense"].forEach(c => {
+    document.getElementById("btn-" + c).classList.toggle("active", c === cat);
+  });
+  sortKey = DEFAULT_SORT[cat];
+  sortAsc = cat === "defense";
+  document.getElementById("min-plays").value = DEFAULT_MIN[cat];
+  loadData();
+}
+
+function switchMode(mode) {
+  if (mode === "season") {
+    currentMode = "season";
+    document.getElementById("mode-season").classList.add("active");
+    document.getElementById("mode-alltime").classList.remove("active");
+    document.getElementById("season-single-ctrl").style.display = "";
+    document.getElementById("season-range-ctrl").style.display = "none";
+    document.getElementById("view-toggle-ctrl").style.display = "none";
+  } else {
+    currentMode = "career";
+    document.getElementById("mode-season").classList.remove("active");
+    document.getElementById("mode-alltime").classList.add("active");
+    document.getElementById("season-single-ctrl").style.display = "none";
+    document.getElementById("season-range-ctrl").style.display = "";
+    document.getElementById("view-toggle-ctrl").style.display = "";
+    document.getElementById("view-career").classList.add("active");
+    document.getElementById("view-seasons").classList.remove("active");
+  }
+  loadData();
+}
+
+function switchView(view) {
+  currentMode = view;
+  document.getElementById("view-career").classList.toggle("active", view === "career");
+  document.getElementById("view-seasons").classList.toggle("active", view === "seasons");
+  loadData();
+}
+
+async function loadData() {
+  document.getElementById("loading").style.display = "";
+  document.getElementById("stats-table").style.display = "none";
+
+  const params = new URLSearchParams();
+  params.set("category", currentCategory);
+  params.set("mode", currentMode);
+  params.set("limit", "100");
+
+  if (currentMode === "season") {
+    const s = document.getElementById("season-select").value;
+    if (!s) return;
+    params.set("season", s);
+  } else {
+    params.set("season_min", document.getElementById("season-min").value);
+    params.set("season_max", document.getElementById("season-max").value);
+  }
+
+  const team = document.getElementById("team-select").value;
+  if (team) params.set("team", team);
+
+  const pos = document.getElementById("pos-select").value;
+  if (pos) params.set("position", pos);
+
+  const minPlays = document.getElementById("min-plays").value;
+  if (minPlays) params.set("min_plays", minPlays);
+
+  try {
+    const resp = await fetch(`/epa/leaderboard?${params}`);
+    currentData = await resp.json();
+    renderTable();
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error loading data: " + e.message;
+  }
+}
+
+async function init() {
+  try {
+    // Fetch seasons
+    const seasonsResp = await fetch("/epa/seasons");
+    allSeasons = await seasonsResp.json();
+
+    const selSingle = document.getElementById("season-select");
+    const selMin = document.getElementById("season-min");
+    const selMax = document.getElementById("season-max");
+
+    allSeasons.forEach(s => {
+      const opt1 = document.createElement("option");
+      opt1.value = s; opt1.textContent = `S${s}`;
+      selSingle.appendChild(opt1);
+    });
+
+    // For range selectors, show ascending order
+    const ascending = [...allSeasons].reverse();
+    ascending.forEach(s => {
+      const opt2 = document.createElement("option");
+      opt2.value = s; opt2.textContent = `S${s}`;
+      selMin.appendChild(opt2);
+      const opt3 = document.createElement("option");
+      opt3.value = s; opt3.textContent = `S${s}`;
+      selMax.appendChild(opt3);
+    });
+
+    if (allSeasons.length > 0) {
+      selSingle.value = allSeasons[0];
+      selMin.value = ascending[0];
+      selMax.value = ascending[ascending.length - 1];
+    }
+
+    // Fetch positions
+    const posResp = await fetch("/epa/positions");
+    const positions = await posResp.json();
+    const posSel = document.getElementById("pos-select");
+    positions.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p; opt.textContent = p;
+      posSel.appendChild(opt);
+    });
+
+    // Fetch teams
+    const teamsResp = await fetch("/epa/teams");
+    const teams = await teamsResp.json();
+    const teamSel = document.getElementById("team-select");
+    teams.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t; opt.textContent = t;
+      teamSel.appendChild(opt);
+    });
+
+    // Set default min plays
+    document.getElementById("min-plays").value = DEFAULT_MIN[currentCategory];
+
+    if (allSeasons.length > 0) {
+      loadData();
+    } else {
+      document.getElementById("loading").textContent = "No EPA data available. Run compute-epa first.";
+    }
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error connecting to API: " + e.message;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
