@@ -7,12 +7,13 @@ by the S27+ JSON scraper so the downstream parser is engine-agnostic.
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 
-import requests
 from bs4 import BeautifulSoup
 
-from isfl_epa.config import League, get_game_results_url, get_pbp_html_url
+from isfl_epa.config import League, SCRAPER_MAX_WORKERS, get_game_results_url, get_pbp_html_url
 from isfl_epa.scraper.cache import get_cached, save_to_cache
+from isfl_epa.scraper.http import get_session
 
 _QUARTER_MAP = {
     "First Quarter": "Q1",
@@ -146,7 +147,7 @@ def fetch_game_html(
             return cached
 
     url = get_pbp_html_url(league, season, game_id)
-    resp = requests.get(url, timeout=30)
+    resp = get_session().get(url, timeout=30)
     resp.raise_for_status()
 
     game = _parse_html(resp.text, game_id)
@@ -164,7 +165,7 @@ def fetch_game_ids(
             return cached
 
     url = get_game_results_url(league, season)
-    resp = requests.get(url, timeout=30)
+    resp = get_session().get(url, timeout=30)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -182,10 +183,15 @@ def fetch_game_ids(
 def fetch_all_season_pbp_html(
     league: League, season: int, *, force_refresh: bool = False
 ) -> list[dict]:
-    """Fetch all PBP data for an HTML-era season."""
+    """Fetch all PBP data for an HTML-era season (concurrent)."""
     game_ids = fetch_game_ids(league, season, force_refresh=force_refresh)
-    all_games = []
-    for gid in game_ids:
-        game = fetch_game_html(league, season, gid, force_refresh=force_refresh)
-        all_games.append(game)
-    return all_games
+    with ThreadPoolExecutor(max_workers=SCRAPER_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(fetch_game_html, league, season, gid, force_refresh=force_refresh): gid
+            for gid in game_ids
+        }
+        # Collect in original game_id order
+        results = {}
+        for f, gid in futures.items():
+            results[gid] = f.result()
+    return [results[gid] for gid in game_ids]

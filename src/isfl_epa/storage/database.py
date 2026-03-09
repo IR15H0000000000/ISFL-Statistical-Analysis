@@ -9,7 +9,7 @@ Schema:
 
 from __future__ import annotations
 
-import os
+import logging
 
 from sqlalchemy import (
     Boolean,
@@ -26,6 +26,7 @@ from sqlalchemy import (
     func,
     insert,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
@@ -40,7 +41,9 @@ from isfl_epa.stats.aggregation import (
     game_team_stats,
 )
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg://isfl:isfl@localhost:5432/isfl"
+from isfl_epa.config import get_database_url
+
+logger = logging.getLogger(__name__)
 
 metadata = MetaData()
 
@@ -310,7 +313,7 @@ team_season_epa_table = Table(
 
 
 def get_engine(database_url: str | None = None) -> Engine:
-    url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    url = database_url or get_database_url()
     return create_engine(url)
 
 
@@ -394,15 +397,47 @@ def load_season(
     games: list[Game],
     registry: PlayerRegistry,
 ) -> None:
-    """Load all plays and stats for a list of games into PostgreSQL."""
+    """Load all plays and stats for a list of games into PostgreSQL (batch)."""
+    all_plays = []
+    all_team_stats = []
+    all_passing = []
+    all_rushing = []
+    all_receiving = []
+    all_defensive = []
+
+    for game in games:
+        all_plays.extend(_build_play_dicts(game, registry))
+        all_team_stats.extend(tg.model_dump() for tg in game_team_stats(game))
+        all_passing.extend(ps.model_dump() for ps in game_player_passing(game, registry))
+        all_rushing.extend(rs.model_dump() for rs in game_player_rushing(game, registry))
+        all_receiving.extend(rc.model_dump() for rc in game_player_receiving(game, registry))
+        all_defensive.extend(d.model_dump() for d in game_player_defensive(game, registry))
+
     with engine.begin() as conn:
-        for game in games:
-            _load_game_plays(conn, game, registry)
-            _load_game_stats(conn, game, registry)
+        if all_plays:
+            conn.execute(insert(plays_table), all_plays)
+        if all_team_stats:
+            conn.execute(insert(team_games_table), all_team_stats)
+        if all_passing:
+            conn.execute(insert(player_game_passing_table), all_passing)
+        if all_rushing:
+            conn.execute(insert(player_game_rushing_table), all_rushing)
+        if all_receiving:
+            conn.execute(insert(player_game_receiving_table), all_receiving)
+        if all_defensive:
+            conn.execute(insert(player_game_defensive_table), all_defensive)
+
+    logger.info(
+        "load_season: batch inserted %d plays, %d team stats, "
+        "%d passing, %d rushing, %d receiving, %d defensive rows",
+        len(all_plays), len(all_team_stats), len(all_passing),
+        len(all_rushing), len(all_receiving), len(all_defensive),
+    )
 
 
-def _load_game_plays(conn, game: Game, registry: PlayerRegistry) -> None:
-    """Insert all plays for a game."""
+def _build_play_dicts(game: Game, registry: PlayerRegistry) -> list[dict]:
+    """Build list of play insert dicts for a game."""
+    rows = []
     for idx, play in enumerate(game.plays):
         team_abbr = None
         if play.possession_team_id == game.home_team_id:
@@ -410,84 +445,62 @@ def _load_game_plays(conn, game: Game, registry: PlayerRegistry) -> None:
         elif play.possession_team_id == game.away_team_id:
             team_abbr = game.away_team
 
-        conn.execute(insert(plays_table).values(
-            game_id=game.id,
-            season=game.season,
-            league=game.league,
-            quarter=play.quarter,
-            clock=play.clock,
-            play_index=idx,
-            play_type=play.play_type.value,
-            description=play.description,
-            css=play.css,
-            down=play.down,
-            distance=play.distance,
-            distance_text=play.distance_text,
-            yard_line=play.yard_line,
-            yard_line_team=play.yard_line_team,
-            possession_team_id=play.possession_team_id,
-            score_away=play.score_away,
-            score_home=play.score_home,
-            away_team=play.away_team,
-            home_team=play.home_team,
-            yards_gained=play.yards_gained,
-            first_down=play.first_down,
-            touchdown=play.touchdown,
-            fumble=play.fumble,
-            fumble_lost=play.fumble_lost,
-            interception=play.interception,
-            safety=play.safety,
-            turnover_on_downs=play.turnover_on_downs,
-            penalty=play.penalty,
-            penalty_team=play.penalty_team,
-            penalty_type=play.penalty_type,
-            penalty_auto_first=play.penalty_auto_first,
-            passer=play.passer,
-            rusher=play.rusher,
-            receiver=play.receiver,
-            tackler=play.tackler,
-            sacker=play.sacker,
-            interceptor=play.interceptor,
-            kicker=play.kicker,
-            returner=play.returner,
-            fumbler=play.fumbler,
-            fumble_recoverer=play.fumble_recoverer,
-            player_id_passer=_resolve_player_id(registry, play.passer, game.season, team_abbr),
-            player_id_rusher=_resolve_player_id(registry, play.rusher, game.season, team_abbr),
-            player_id_receiver=_resolve_player_id(registry, play.receiver, game.season, team_abbr),
-            player_id_tackler=_resolve_player_id(registry, play.tackler, game.season, None),
-            player_id_sacker=_resolve_player_id(registry, play.sacker, game.season, None),
-            player_id_interceptor=_resolve_player_id(registry, play.interceptor, game.season, None),
-            player_id_kicker=_resolve_player_id(registry, play.kicker, game.season, team_abbr),
-            player_id_returner=_resolve_player_id(registry, play.returner, game.season, None),
-            kick_yards=play.kick_yards,
-            fg_distance=play.fg_distance,
-            fg_good=play.fg_good,
-            pat_good=play.pat_good,
-        ))
-
-
-def _load_game_stats(conn, game: Game, registry: PlayerRegistry) -> None:
-    """Insert team and player game stats."""
-    # Team stats
-    for tg in game_team_stats(game):
-        conn.execute(insert(team_games_table).values(**tg.model_dump()))
-
-    # Player passing
-    for ps in game_player_passing(game, registry):
-        conn.execute(insert(player_game_passing_table).values(**ps.model_dump()))
-
-    # Player rushing
-    for rs in game_player_rushing(game, registry):
-        conn.execute(insert(player_game_rushing_table).values(**rs.model_dump()))
-
-    # Player receiving
-    for rc in game_player_receiving(game, registry):
-        conn.execute(insert(player_game_receiving_table).values(**rc.model_dump()))
-
-    # Player defensive
-    for df in game_player_defensive(game, registry):
-        conn.execute(insert(player_game_defensive_table).values(**df.model_dump()))
+        rows.append({
+            "game_id": game.id,
+            "season": game.season,
+            "league": game.league,
+            "quarter": play.quarter,
+            "clock": play.clock,
+            "play_index": idx,
+            "play_type": play.play_type.value,
+            "description": play.description,
+            "css": play.css,
+            "down": play.down,
+            "distance": play.distance,
+            "distance_text": play.distance_text,
+            "yard_line": play.yard_line,
+            "yard_line_team": play.yard_line_team,
+            "possession_team_id": play.possession_team_id,
+            "score_away": play.score_away,
+            "score_home": play.score_home,
+            "away_team": play.away_team,
+            "home_team": play.home_team,
+            "yards_gained": play.yards_gained,
+            "first_down": play.first_down,
+            "touchdown": play.touchdown,
+            "fumble": play.fumble,
+            "fumble_lost": play.fumble_lost,
+            "interception": play.interception,
+            "safety": play.safety,
+            "turnover_on_downs": play.turnover_on_downs,
+            "penalty": play.penalty,
+            "penalty_team": play.penalty_team,
+            "penalty_type": play.penalty_type,
+            "penalty_auto_first": play.penalty_auto_first,
+            "passer": play.passer,
+            "rusher": play.rusher,
+            "receiver": play.receiver,
+            "tackler": play.tackler,
+            "sacker": play.sacker,
+            "interceptor": play.interceptor,
+            "kicker": play.kicker,
+            "returner": play.returner,
+            "fumbler": play.fumbler,
+            "fumble_recoverer": play.fumble_recoverer,
+            "player_id_passer": _resolve_player_id(registry, play.passer, game.season, team_abbr),
+            "player_id_rusher": _resolve_player_id(registry, play.rusher, game.season, team_abbr),
+            "player_id_receiver": _resolve_player_id(registry, play.receiver, game.season, team_abbr),
+            "player_id_tackler": _resolve_player_id(registry, play.tackler, game.season, None),
+            "player_id_sacker": _resolve_player_id(registry, play.sacker, game.season, None),
+            "player_id_interceptor": _resolve_player_id(registry, play.interceptor, game.season, None),
+            "player_id_kicker": _resolve_player_id(registry, play.kicker, game.season, team_abbr),
+            "player_id_returner": _resolve_player_id(registry, play.returner, game.season, None),
+            "kick_yards": play.kick_yards,
+            "fg_distance": play.fg_distance,
+            "fg_good": play.fg_good,
+            "pat_good": play.pat_good,
+        })
+    return rows
 
 
 def load_epa_season(engine: Engine, epa_df, season: int) -> None:
@@ -500,18 +513,24 @@ def load_epa_season(engine: Engine, epa_df, season: int) -> None:
         conn.execute(player_season_epa_table.delete().where(player_season_epa_table.c.season == season))
         conn.execute(team_season_epa_table.delete().where(team_season_epa_table.c.season == season))
 
-        # Insert per-play EPA (only plays with valid EPA)
+        # Insert per-play EPA (only plays with valid EPA) — batch insert
         valid = epa_df.dropna(subset=["epa"])
         if "id" in valid.columns:
-            for row in valid.itertuples(index=False):
-                conn.execute(insert(play_epa_table).values(
-                    play_id=int(row.id) if pd.notna(row.id) else None,
-                    game_id=int(row.game_id),
-                    season=season,
-                    ep_before=float(row.ep_before),
-                    ep_after=float(row.ep_after),
-                    epa=float(row.epa),
-                ))
+            rows = [
+                {
+                    "play_id": int(r.id) if pd.notna(r.id) else None,
+                    "game_id": int(r.game_id),
+                    "season": season,
+                    "ep_before": float(r.ep_before),
+                    "ep_after": float(r.ep_after),
+                    "epa": float(r.epa),
+                }
+                for r in valid.itertuples(index=False)
+                if pd.notna(r.id)
+            ]
+            if rows:
+                conn.execute(insert(play_epa_table), rows)
+                logger.info("load_epa_season: inserted %d play EPA rows (batch)", len(rows))
 
         # Aggregate and insert player EPA
         _load_player_epa(conn, epa_df, season)
@@ -524,120 +543,157 @@ def _load_player_epa(conn, epa_df, season: int) -> None:
     """Aggregate and insert per-player EPA stats."""
     import pandas as pd
 
+    from isfl_epa.players.registry import _strip_tags
+
     valid = epa_df.dropna(subset=["epa"])
+    logger.info("_load_player_epa: S%d — %d valid EPA plays", season, len(valid))
 
-    # Passing EPA: plays where passer is set (pass + sack)
+    _insert_passing_epa(conn, valid, season, _strip_tags)
+    _upsert_rushing_epa(conn, valid, season, _strip_tags)
+    _upsert_receiving_epa(conn, valid, season, _strip_tags)
+    _upsert_defensive_epa(conn, valid, season, _strip_tags)
+
+
+def _insert_passing_epa(conn, valid, season: int, strip_fn) -> None:
+    """Aggregate and insert passing EPA (creates new rows) — batch."""
+    import pandas as pd
+
     pass_plays = valid[valid["passer"].notna() & valid["play_type"].isin(["pass", "sack"])]
-    if not pass_plays.empty:
-        pass_agg = pass_plays.groupby(["player_id_passer", "passer", "possession_team"]).agg(
-            pass_epa=("epa", "sum"),
-            dropbacks=("epa", "count"),
-        ).reset_index()
-        pass_agg["epa_per_dropback"] = pass_agg["pass_epa"] / pass_agg["dropbacks"]
-    else:
-        pass_agg = pd.DataFrame()
+    if pass_plays.empty:
+        return
 
-    # Rushing EPA
+    pass_agg = pass_plays.groupby(["player_id_passer"]).agg(
+        passer=("passer", "first"),
+        possession_team=("possession_team", "first"),
+        pass_epa=("epa", "sum"),
+        dropbacks=("epa", "count"),
+    ).reset_index()
+    pass_agg["passer"] = pass_agg["passer"].apply(strip_fn)
+    pass_agg["epa_per_dropback"] = pass_agg["pass_epa"] / pass_agg["dropbacks"]
+    logger.debug("_insert_passing_epa: %d passers", len(pass_agg))
+
+    rows = [
+        {
+            "player_id": int(row.player_id_passer) if pd.notna(row.player_id_passer) else None,
+            "player": row.passer,
+            "team": getattr(row, "possession_team", None),
+            "season": season,
+            "pass_epa": float(row.pass_epa),
+            "dropbacks": int(row.dropbacks),
+            "epa_per_dropback": float(row.epa_per_dropback),
+        }
+        for row in pass_agg.itertuples(index=False)
+    ]
+    if rows:
+        conn.execute(insert(player_season_epa_table), rows)
+
+
+def _fetch_existing_player_epa(conn, season: int) -> dict[int, int]:
+    """Fetch all existing player_season_epa rows for a season.
+
+    Returns dict mapping player_id -> row id (for targeted updates).
+    """
+    t = player_season_epa_table
+    rows = conn.execute(
+        select(t.c.player_id, t.c.id).where(t.c.season == season)
+    ).fetchall()
+    return {r.player_id: r.id for r in rows if r.player_id is not None}
+
+
+def _upsert_rushing_epa(conn, valid, season: int, strip_fn) -> None:
+    """Aggregate and upsert rushing EPA — batch with single SELECT."""
+    import pandas as pd
+
     rush_plays = valid[(valid["rusher"].notna()) & (valid["play_type"] == "rush")]
-    if not rush_plays.empty:
-        rush_agg = rush_plays.groupby(["player_id_rusher", "rusher", "possession_team"]).agg(
-            rush_epa=("epa", "sum"),
-            rush_attempts=("epa", "count"),
-        ).reset_index()
-        rush_agg["epa_per_rush"] = rush_agg["rush_epa"] / rush_agg["rush_attempts"]
-    else:
-        rush_agg = pd.DataFrame()
+    if rush_plays.empty:
+        return
 
-    # Receiving EPA
-    recv_plays = valid[(valid["receiver"].notna()) & (valid["play_type"] == "pass")]
-    if not recv_plays.empty:
-        recv_agg = recv_plays.groupby(["player_id_receiver", "receiver", "possession_team"]).agg(
-            recv_epa=("epa", "sum"),
-            targets=("epa", "count"),
-        ).reset_index()
-        recv_agg["epa_per_target"] = recv_agg["recv_epa"] / recv_agg["targets"]
-    else:
-        recv_agg = pd.DataFrame()
+    rush_agg = rush_plays.groupby(["player_id_rusher"]).agg(
+        rusher=("rusher", "first"),
+        possession_team=("possession_team", "first"),
+        rush_epa=("epa", "sum"),
+        rush_attempts=("epa", "count"),
+    ).reset_index()
+    rush_agg["rusher"] = rush_agg["rusher"].apply(strip_fn)
+    rush_agg["epa_per_rush"] = rush_agg["rush_epa"] / rush_agg["rush_attempts"]
+    logger.debug("_upsert_rushing_epa: %d rushers", len(rush_agg))
 
-    # Merge all EPA types per player and insert
-    # For simplicity, insert passing/rushing/receiving separately
-    for row in pass_agg.itertuples(index=False) if not pass_agg.empty else []:
-        conn.execute(insert(player_season_epa_table).values(
-            player_id=int(row.player_id_passer) if pd.notna(row.player_id_passer) else None,
-            player=row.passer,
-            team=getattr(row, "possession_team", None),
-            season=season,
-            pass_epa=float(row.pass_epa),
-            dropbacks=int(row.dropbacks),
-            epa_per_dropback=float(row.epa_per_dropback),
-        ))
+    # Single SELECT to find all existing rows for this season
+    existing = _fetch_existing_player_epa(conn, season)
 
-    for row in rush_agg.itertuples(index=False) if not rush_agg.empty else []:
+    insert_rows = []
+    for row in rush_agg.itertuples(index=False):
         pid = int(row.player_id_rusher) if pd.notna(row.player_id_rusher) else None
-        # Check if player already has a row (from passing), update it
-        existing = None
-        if pid is not None:
-            existing = conn.execute(
-                select(player_season_epa_table).where(
-                    (player_season_epa_table.c.player_id == pid)
-                    & (player_season_epa_table.c.season == season)
-                )
-            ).first()
-        if existing:
+        vals = {
+            "rush_epa": float(row.rush_epa),
+            "rush_attempts": int(row.rush_attempts),
+            "epa_per_rush": float(row.epa_per_rush),
+        }
+        if pid is not None and pid in existing:
             conn.execute(
                 player_season_epa_table.update()
-                .where(player_season_epa_table.c.id == existing.id)
-                .values(
-                    rush_epa=float(row.rush_epa),
-                    rush_attempts=int(row.rush_attempts),
-                    epa_per_rush=float(row.epa_per_rush),
-                )
+                .where(player_season_epa_table.c.id == existing[pid])
+                .values(**vals)
             )
         else:
-            conn.execute(insert(player_season_epa_table).values(
-                player_id=pid,
-                player=row.rusher,
-                team=getattr(row, "possession_team", None),
-                season=season,
-                rush_epa=float(row.rush_epa),
-                rush_attempts=int(row.rush_attempts),
-                epa_per_rush=float(row.epa_per_rush),
-            ))
+            insert_rows.append({
+                "player_id": pid, "player": row.rusher,
+                "team": getattr(row, "possession_team", None), "season": season,
+                **vals,
+            })
+    if insert_rows:
+        conn.execute(insert(player_season_epa_table), insert_rows)
 
-    for row in recv_agg.itertuples(index=False) if not recv_agg.empty else []:
+
+def _upsert_receiving_epa(conn, valid, season: int, strip_fn) -> None:
+    """Aggregate and upsert receiving EPA — batch with single SELECT."""
+    import pandas as pd
+
+    recv_plays = valid[(valid["receiver"].notna()) & (valid["play_type"] == "pass")]
+    if recv_plays.empty:
+        return
+
+    recv_agg = recv_plays.groupby(["player_id_receiver"]).agg(
+        receiver=("receiver", "first"),
+        possession_team=("possession_team", "first"),
+        recv_epa=("epa", "sum"),
+        targets=("epa", "count"),
+    ).reset_index()
+    recv_agg["receiver"] = recv_agg["receiver"].apply(strip_fn)
+    recv_agg["epa_per_target"] = recv_agg["recv_epa"] / recv_agg["targets"]
+    logger.debug("_upsert_receiving_epa: %d receivers", len(recv_agg))
+
+    existing = _fetch_existing_player_epa(conn, season)
+
+    insert_rows = []
+    for row in recv_agg.itertuples(index=False):
         pid = int(row.player_id_receiver) if pd.notna(row.player_id_receiver) else None
-        existing = None
-        if pid is not None:
-            existing = conn.execute(
-                select(player_season_epa_table).where(
-                    (player_season_epa_table.c.player_id == pid)
-                    & (player_season_epa_table.c.season == season)
-                )
-            ).first()
-        if existing:
+        vals = {
+            "recv_epa": float(row.recv_epa),
+            "targets": int(row.targets),
+            "epa_per_target": float(row.epa_per_target),
+        }
+        if pid is not None and pid in existing:
             conn.execute(
                 player_season_epa_table.update()
-                .where(player_season_epa_table.c.id == existing.id)
-                .values(
-                    recv_epa=float(row.recv_epa),
-                    targets=int(row.targets),
-                    epa_per_target=float(row.epa_per_target),
-                )
+                .where(player_season_epa_table.c.id == existing[pid])
+                .values(**vals)
             )
         else:
-            conn.execute(insert(player_season_epa_table).values(
-                player_id=pid,
-                player=row.receiver,
-                team=getattr(row, "possession_team", None),
-                season=season,
-                recv_epa=float(row.recv_epa),
-                targets=int(row.targets),
-                epa_per_target=float(row.epa_per_target),
-            ))
+            insert_rows.append({
+                "player_id": pid, "player": row.receiver,
+                "team": getattr(row, "possession_team", None), "season": season,
+                **vals,
+            })
+    if insert_rows:
+        conn.execute(insert(player_season_epa_table), insert_rows)
 
-    # Defensive EPA: attribute to sacker > interceptor > tackler
+
+def _upsert_defensive_epa(conn, valid, season: int, strip_fn) -> None:
+    """Aggregate and upsert defensive EPA (sacker > interceptor > tackler)."""
+    import pandas as pd
+
     def _def_player(row):
-        """Return (player_id, player_name) for the primary defensive player."""
         sacker_id = getattr(row, "player_id_sacker", None)
         if pd.notna(sacker_id):
             return int(sacker_id), getattr(row, "sacker", None)
@@ -650,47 +706,84 @@ def _load_player_epa(conn, epa_df, season: int) -> None:
         return None, None
 
     scrimmage = valid[valid["play_type"].isin(["pass", "rush", "sack"])]
+
+    # Build per-game team pair lookup for defensive team resolution
+    _game_teams: dict[int, list[str]] = {}
+    if "possession_team" in scrimmage.columns:
+        for gid, grp in scrimmage.groupby("game_id"):
+            teams = grp["possession_team"].dropna().unique().tolist()
+            _game_teams[int(gid)] = teams
+
+    def _def_team(row):
+        poss = getattr(row, "possession_team", None)
+        gid = getattr(row, "game_id", None)
+        if not poss or pd.isna(poss) or gid is None:
+            return None
+        teams = _game_teams.get(int(gid), [])
+        opponents = [t for t in teams if t != poss]
+        return opponents[0] if opponents else None
+
     def_records = []
     for row in scrimmage.itertuples(index=False):
         pid, pname = _def_player(row)
         if pid is not None:
-            def_records.append({"player_id": pid, "player": pname, "epa": row.epa})
+            def_records.append({
+                "player_id": pid, "player": pname, "epa": row.epa,
+                "team": _def_team(row),
+            })
 
-    if def_records:
-        def_df = pd.DataFrame(def_records)
-        def_agg = def_df.groupby(["player_id", "player"]).agg(
-            def_epa=("epa", "sum"),
-            def_plays=("epa", "count"),
-        ).reset_index()
-        def_agg["epa_per_def_play"] = def_agg["def_epa"] / def_agg["def_plays"]
+    if not def_records:
+        return
 
-        for row in def_agg.itertuples(index=False):
-            pid = int(row.player_id)
-            existing = conn.execute(
-                select(player_season_epa_table).where(
-                    (player_season_epa_table.c.player_id == pid)
-                    & (player_season_epa_table.c.season == season)
-                )
-            ).first()
-            if existing:
-                conn.execute(
-                    player_season_epa_table.update()
-                    .where(player_season_epa_table.c.id == existing.id)
-                    .values(
-                        def_epa=float(row.def_epa),
-                        def_plays=int(row.def_plays),
-                        epa_per_def_play=float(row.epa_per_def_play),
-                    )
-                )
-            else:
-                conn.execute(insert(player_season_epa_table).values(
-                    player_id=pid,
-                    player=row.player,
-                    season=season,
-                    def_epa=float(row.def_epa),
-                    def_plays=int(row.def_plays),
-                    epa_per_def_play=float(row.epa_per_def_play),
-                ))
+    def_df = pd.DataFrame(def_records)
+    def_agg = def_df.groupby(["player_id"]).agg(
+        player=("player", "first"),
+        team=("team", "first"),
+        def_epa=("epa", "sum"),
+        def_plays=("epa", "count"),
+    ).reset_index()
+    def_agg["epa_per_def_play"] = def_agg["def_epa"] / def_agg["def_plays"]
+    def_agg["player"] = def_agg["player"].apply(strip_fn)
+    logger.debug("_upsert_defensive_epa: %d defenders", len(def_agg))
+
+    existing = _fetch_existing_player_epa(conn, season)
+    # Also fetch team info for rows that might need team backfill
+    existing_teams: dict[int, str | None] = {}
+    if existing:
+        t = player_season_epa_table
+        team_rows = conn.execute(
+            select(t.c.player_id, t.c.team).where(
+                t.c.season == season
+            )
+        ).fetchall()
+        existing_teams = {r.player_id: r.team for r in team_rows if r.player_id is not None}
+
+    insert_rows = []
+    for row in def_agg.itertuples(index=False):
+        pid = int(row.player_id)
+        vals = {
+            "def_epa": float(row.def_epa),
+            "def_plays": int(row.def_plays),
+            "epa_per_def_play": float(row.epa_per_def_play),
+        }
+        if pid in existing:
+            if not existing_teams.get(pid) and row.team:
+                vals["team"] = row.team
+            conn.execute(
+                player_season_epa_table.update()
+                .where(player_season_epa_table.c.id == existing[pid])
+                .values(**vals)
+            )
+        else:
+            insert_rows.append({
+                "player_id": pid,
+                "player": row.player,
+                "team": row.team,
+                "season": season,
+                **vals,
+            })
+    if insert_rows:
+        conn.execute(insert(player_season_epa_table), insert_rows)
 
 
 def _load_team_epa(conn, epa_df, season: int) -> None:
@@ -710,17 +803,20 @@ def _load_team_epa(conn, epa_df, season: int) -> None:
     pass_epa = scrimmage[scrimmage["play_type"].isin(["pass", "sack"])].groupby("possession_team")["epa"].sum()
     rush_epa = scrimmage[scrimmage["play_type"] == "rush"].groupby("possession_team")["epa"].sum()
 
-    for row in team_agg.itertuples(index=False):
-        team = row.possession_team
-        conn.execute(insert(team_season_epa_table).values(
-            team=team,
-            season=season,
-            total_epa=float(row.total_epa),
-            pass_epa=float(pass_epa.get(team, 0)),
-            rush_epa=float(rush_epa.get(team, 0)),
-            plays=int(row.plays),
-            epa_per_play=float(row.epa_per_play),
-        ))
+    rows = [
+        {
+            "team": row.possession_team,
+            "season": season,
+            "total_epa": float(row.total_epa),
+            "pass_epa": float(pass_epa.get(row.possession_team, 0)),
+            "rush_epa": float(rush_epa.get(row.possession_team, 0)),
+            "plays": int(row.plays),
+            "epa_per_play": float(row.epa_per_play),
+        }
+        for row in team_agg.itertuples(index=False)
+    ]
+    if rows:
+        conn.execute(insert(team_season_epa_table), rows)
 
 
 def load_player_positions(
@@ -777,6 +873,50 @@ def load_player_positions(
             matched += 1
 
     return {"matched": matched, "unmatched": unmatched}
+
+
+# ---------------------------------------------------------------------------
+# Team ID mapping
+# ---------------------------------------------------------------------------
+
+
+def get_team_id_to_abbr(engine: Engine, season: int) -> dict[int, str]:
+    """Build team_id -> team abbreviation mapping using intersection.
+
+    Team IDs are fixed per team across all games.  For each ptid, intersect
+    {home_team, away_team} across all games.  After 2+ games vs different
+    opponents, only the correct team remains.
+    """
+    p = plays_table
+    # Get distinct (game_id, home_team, away_team, possession_team_id) tuples
+    stmt = (
+        select(
+            p.c.game_id,
+            p.c.home_team,
+            p.c.away_team,
+            p.c.possession_team_id,
+        )
+        .where(p.c.season == season)
+        .where(p.c.possession_team_id.isnot(None))
+        .where(p.c.home_team.isnot(None))
+        .where(p.c.away_team.isnot(None))
+        .distinct()
+    )
+    ptid_candidates: dict[int, set[str]] = {}
+    with engine.connect() as conn:
+        for row in conn.execute(stmt):
+            teams = {row.home_team, row.away_team}
+            ptid = int(row.possession_team_id)
+            if ptid not in ptid_candidates:
+                ptid_candidates[ptid] = teams.copy()
+            else:
+                ptid_candidates[ptid] &= teams
+
+    return {
+        ptid: next(iter(teams))
+        for ptid, teams in ptid_candidates.items()
+        if len(teams) == 1
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +1006,8 @@ def merge_players_db(engine: Engine, merge_pairs: list[tuple[int, int]]) -> int:
 
     if not merge_pairs:
         return 0
+
+    logger.info("merge_players_db: merging %d pairs", len(merge_pairs))
 
     # Build mapping: remove_id -> keep_id
     id_map = {remove: keep for keep, remove in merge_pairs}

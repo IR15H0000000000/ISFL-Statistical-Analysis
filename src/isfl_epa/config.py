@@ -1,3 +1,4 @@
+import os
 from enum import Enum
 
 
@@ -30,6 +31,53 @@ ENGINE_CUTOFF_SEASON = 27
 
 PBP_FILES_PER_SEASON = 10
 BOXSCORE_FILES_PER_SEASON = 10
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+
+DEFAULT_DATABASE_URL = "postgresql+psycopg://isfl:isfl@localhost:5432/isfl"
+
+
+def get_database_url() -> str:
+    """Return the database URL from the environment or fall back to default."""
+    return os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+# ---------------------------------------------------------------------------
+# EPA model hyperparameters
+# ---------------------------------------------------------------------------
+
+EPA_MODEL_MAX_ITER = 200
+EPA_MODEL_MAX_DEPTH = 6
+EPA_MODEL_LEARNING_RATE = 0.1
+EPA_MODEL_MIN_SAMPLES_LEAF = 100
+
+# Feature engineering
+SCORE_CLIP = 28
+DISTANCE_CLIP = 30
+
+# ---------------------------------------------------------------------------
+# EPA stat thresholds (minimum plays for leaderboard display)
+# ---------------------------------------------------------------------------
+
+MIN_DROPBACKS = 100
+MIN_RUSH_ATTEMPTS = 50
+MIN_TARGETS = 30
+
+# ---------------------------------------------------------------------------
+# Training splits
+# ---------------------------------------------------------------------------
+
+TRAIN_SEASONS_2016 = list(range(1, 24))
+TEST_SEASONS_2016 = list(range(24, 27))
+TEST_SEASON_2022_STEP = 5  # every Nth season is test
+
+# ---------------------------------------------------------------------------
+# Scraper concurrency
+# ---------------------------------------------------------------------------
+
+SCRAPER_MAX_WORKERS = 5  # concurrent HTTP requests
 
 
 def get_engine(season: int) -> EngineVersion:

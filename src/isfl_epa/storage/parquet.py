@@ -9,7 +9,7 @@ import pandas as pd
 from isfl_epa.parser.schema import Game
 from isfl_epa.players.registry import PlayerRegistry
 
-DATA_DIR = Path("data/processed")
+DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "processed"
 
 
 def _play_to_row(play, game: Game, play_index: int, registry: PlayerRegistry | None) -> dict:

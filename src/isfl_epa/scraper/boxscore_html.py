@@ -5,11 +5,13 @@ normalizing to the same dict keys used by the S27+ JSON boxscore
 scraper so cross-validation logic is format-agnostic.
 """
 
-import requests
+from concurrent.futures import ThreadPoolExecutor
+
 from bs4 import BeautifulSoup
 
-from isfl_epa.config import League, get_boxscore_html_url
+from isfl_epa.config import League, SCRAPER_MAX_WORKERS, get_boxscore_html_url
 from isfl_epa.scraper.cache import get_cached, save_to_cache
+from isfl_epa.scraper.http import get_session
 from isfl_epa.scraper.pbp_html import fetch_game_ids
 
 # Stat labels in the Team Stats table → output keys
@@ -74,7 +76,7 @@ def fetch_boxscore_html(
             return cached
 
     url = get_boxscore_html_url(league, season, game_id)
-    resp = requests.get(url, timeout=30)
+    resp = get_session().get(url, timeout=30)
     resp.raise_for_status()
 
     result = _parse_boxscore_html(resp.text, game_id)
@@ -86,11 +88,14 @@ def fetch_boxscore_html(
 def fetch_all_season_boxscores_html(
     league: League, season: int, *, force_refresh: bool = False
 ) -> list[dict]:
-    """Fetch all boxscore data for an HTML-era season."""
+    """Fetch all boxscore data for an HTML-era season (concurrent)."""
     game_ids = fetch_game_ids(league, season, force_refresh=force_refresh)
-    all_boxes = []
-    for gid in game_ids:
-        box = fetch_boxscore_html(league, season, gid, force_refresh=force_refresh)
-        if box:
-            all_boxes.append(box)
-    return all_boxes
+    with ThreadPoolExecutor(max_workers=SCRAPER_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(fetch_boxscore_html, league, season, gid, force_refresh=force_refresh): gid
+            for gid in game_ids
+        }
+        results = {}
+        for f, gid in futures.items():
+            results[gid] = f.result()
+    return [results[gid] for gid in game_ids if results[gid] is not None]

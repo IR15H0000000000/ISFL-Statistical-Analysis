@@ -9,6 +9,23 @@ app = typer.Typer(help="ISFL play-by-play analyzer and EPA calculator")
 console = Console()
 
 
+@app.callback()
+def main(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable DEBUG logging"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress INFO logging (WARNING+ only)"),
+):
+    """ISFL play-by-play analyzer and EPA calculator."""
+    from isfl_epa.logging_config import setup_logging
+
+    if verbose:
+        level = "DEBUG"
+    elif quiet:
+        level = "WARNING"
+    else:
+        level = "INFO"
+    setup_logging(level, rich_handler=True)
+
+
 @app.command()
 def scrape(
     league: League = typer.Option(League.ISFL, help="League to scrape"),
@@ -355,15 +372,21 @@ def train_ep(
 
     is_regression = model_type == "hgb_reg"
 
+    from isfl_epa.config import (
+        TEST_SEASON_2022_STEP,
+        TEST_SEASONS_2016,
+        TRAIN_SEASONS_2016,
+    )
+
     eras = {}
     if era in ("2016", "both"):
         eras["2016"] = {
-            "train_seasons": list(range(1, 24)),
-            "test_seasons": list(range(24, 27)),
+            "train_seasons": TRAIN_SEASONS_2016,
+            "test_seasons": TEST_SEASONS_2016,
             "save_path": MODEL_2016_PATH,
         }
     if era in ("2022", "both"):
-        test_2022 = list(range(27, 60, 5))  # every 5th season: 27,32,37,...,57
+        test_2022 = list(range(27, 60, TEST_SEASON_2022_STEP))
         train_2022 = [s for s in range(27, 60) if s not in test_2022]
         eras["2022"] = {
             "train_seasons": train_2022,
@@ -372,53 +395,65 @@ def train_ep(
         }
 
     for era_name, cfg in eras.items():
-        console.print(f"\n[bold]Training {era_name} era model ({model_type})[/bold]")
+        _train_era(
+            era_name, cfg, model_type, league.value, is_regression,
+            load_training_plays, label_drive_outcome, label_next_score,
+            build_drive_feature_matrix, build_era_feature_matrix, EPModel,
+        )
 
-        console.print(f"  Loading training data ({len(cfg['train_seasons'])} seasons)...")
-        train_df = load_training_plays(cfg["train_seasons"], league.value)
-        console.print(f"  {len(train_df):,} plays loaded")
 
-        if is_regression:
-            console.print("  Labeling drive outcomes...")
-            train_df = label_drive_outcome(train_df)
-            console.print("  Building feature matrix...")
-            X_train, y_train, _, is_start = build_drive_feature_matrix(train_df)
-            # Train on drive starts only for better calibration at drive boundaries
-            X_train = X_train[is_start]
-            y_train = y_train[is_start]
-        else:
-            console.print("  Labeling next-score events...")
-            train_df = label_next_score(train_df)
-            console.print("  Building feature matrix...")
-            X_train, y_train = build_era_feature_matrix(train_df)
-        console.print(f"  {len(X_train):,} training samples")
+def _train_era(
+    era_name, cfg, model_type, league_value, is_regression,
+    load_training_plays, label_drive_outcome, label_next_score,
+    build_drive_feature_matrix, build_era_feature_matrix, EPModel,
+):
+    """Train and evaluate a single era model."""
+    console.print(f"\n[bold]Training {era_name} era model ({model_type})[/bold]")
 
-        console.print(f"  Loading test data ({len(cfg['test_seasons'])} seasons)...")
-        test_df = load_training_plays(cfg["test_seasons"], league.value)
-        if is_regression:
-            test_df = label_drive_outcome(test_df)
-            X_test, y_test, _, is_start_test = build_drive_feature_matrix(test_df)
-            X_test = X_test[is_start_test]
-            y_test = y_test[is_start_test]
-        else:
-            test_df = label_next_score(test_df)
-            X_test, y_test = build_era_feature_matrix(test_df)
-        console.print(f"  {len(X_test):,} test samples")
+    console.print(f"  Loading training data ({len(cfg['train_seasons'])} seasons)...")
+    train_df = load_training_plays(cfg["train_seasons"], league_value)
+    console.print(f"  {len(train_df):,} plays loaded")
 
-        ep = EPModel()
-        train_metrics = ep.train(X_train, y_train, model_type=model_type)
-        test_metrics = ep.evaluate(X_test, y_test)
+    if is_regression:
+        console.print("  Labeling drive outcomes...")
+        train_df = label_drive_outcome(train_df)
+        console.print("  Building feature matrix...")
+        X_train, y_train, _, is_start = build_drive_feature_matrix(train_df)
+        X_train = X_train[is_start]
+        y_train = y_train[is_start]
+    else:
+        console.print("  Labeling next-score events...")
+        train_df = label_next_score(train_df)
+        console.print("  Building feature matrix...")
+        X_train, y_train = build_era_feature_matrix(train_df)
+    console.print(f"  {len(X_train):,} training samples")
 
-        if is_regression:
-            console.print(f"  Train MAE: {train_metrics['train_mae']:.4f}")
-            console.print(f"  Test MAE:  {test_metrics['mae']:.4f}")
-            console.print(f"  Test R²:   {test_metrics['r2']:.4f}")
-        else:
-            console.print(f"  Train log-loss: {train_metrics['train_log_loss']:.4f}")
-            console.print(f"  Test log-loss:  {test_metrics['log_loss']:.4f}")
+    console.print(f"  Loading test data ({len(cfg['test_seasons'])} seasons)...")
+    test_df = load_training_plays(cfg["test_seasons"], league_value)
+    if is_regression:
+        test_df = label_drive_outcome(test_df)
+        X_test, y_test, _, is_start_test = build_drive_feature_matrix(test_df)
+        X_test = X_test[is_start_test]
+        y_test = y_test[is_start_test]
+    else:
+        test_df = label_next_score(test_df)
+        X_test, y_test = build_era_feature_matrix(test_df)
+    console.print(f"  {len(X_test):,} test samples")
 
-        ep.save(cfg["save_path"])
-        console.print(f"  [green]Saved to {cfg['save_path']}[/green]")
+    ep = EPModel()
+    train_metrics = ep.train(X_train, y_train, model_type=model_type)
+    test_metrics = ep.evaluate(X_test, y_test)
+
+    if is_regression:
+        console.print(f"  Train MAE: {train_metrics['train_mae']:.4f}")
+        console.print(f"  Test MAE:  {test_metrics['mae']:.4f}")
+        console.print(f"  Test R²:   {test_metrics['r2']:.4f}")
+    else:
+        console.print(f"  Train log-loss: {train_metrics['train_log_loss']:.4f}")
+        console.print(f"  Test log-loss:  {test_metrics['log_loss']:.4f}")
+
+    ep.save(cfg["save_path"])
+    console.print(f"  [green]Saved to {cfg['save_path']}[/green]")
 
 
 @app.command()
@@ -514,10 +549,12 @@ def epa_stats(
             console.print(table)
         else:
             t = player_season_epa_table
+            from isfl_epa.config import MIN_DROPBACKS, MIN_RUSH_ATTEMPTS, MIN_TARGETS
+
             col_map = {
-                "passing": ("pass_epa", "dropbacks", "epa_per_dropback", 100),
-                "rushing": ("rush_epa", "rush_attempts", "epa_per_rush", 50),
-                "receiving": ("recv_epa", "targets", "epa_per_target", 30),
+                "passing": ("pass_epa", "dropbacks", "epa_per_dropback", MIN_DROPBACKS),
+                "rushing": ("rush_epa", "rush_attempts", "epa_per_rush", MIN_RUSH_ATTEMPTS),
+                "receiving": ("recv_epa", "targets", "epa_per_target", MIN_TARGETS),
             }
             if stat not in col_map:
                 console.print(f"[red]Unknown stat: {stat}[/red]")
@@ -560,10 +597,15 @@ def scrape_rosters(
     """Scrape team roster pages and load player positions into the database."""
     from sqlalchemy import select
 
-    from isfl_epa.scraper.roster import fetch_season_rosters, match_roster_to_players
+    from isfl_epa.scraper.roster import (
+        TEAM_ABBR_MAP,
+        fetch_season_rosters,
+        match_roster_to_players,
+    )
     from isfl_epa.storage.database import (
         create_tables,
         get_engine,
+        get_team_id_to_abbr,
         load_player_positions,
         player_names_table,
     )
@@ -585,42 +627,73 @@ def scrape_rosters(
     total_unmatched = 0
 
     for s in seasons:
-        console.print(f"Scraping {league.value} S{s} rosters...")
-        roster = fetch_season_rosters(league, s, force_refresh=force_refresh)
-        if not roster:
-            console.print(f"  [yellow]No roster data found[/yellow]")
-            continue
-
-        console.print(f"  Found {len(roster)} players across all teams")
-
-        # Load player_names for this season to match against
-        with engine.connect() as conn:
-            pn_rows = conn.execute(
-                select(player_names_table).where(player_names_table.c.season == s)
-            ).fetchall()
-
-        player_names = [
-            {"player_id": r.player_id, "name": r.name, "team": r.team}
-            for r in pn_rows
-        ]
-
-        # Match roster names to player IDs
-        roster = match_roster_to_players(roster, player_names)
-
-        # Add team abbreviation from player_names if available
-        # Build lookup: player_id -> team
-        pid_team = {r.player_id: r.team for r in pn_rows if r.team}
-        for entry in roster:
-            if entry.get("player_id") and not entry.get("team"):
-                entry["team"] = pid_team.get(entry["player_id"])
-
-        result = load_player_positions(engine, roster, s)
-        console.print(f"  Matched: {result['matched']}, Unmatched: {result['unmatched']}")
-        total_matched += result["matched"]
-        total_unmatched += result["unmatched"]
+        result = _scrape_and_load_season_roster(
+            engine, league, s, force_refresh,
+            select, player_names_table, TEAM_ABBR_MAP,
+            fetch_season_rosters, match_roster_to_players,
+            get_team_id_to_abbr, load_player_positions,
+        )
+        if result:
+            total_matched += result["matched"]
+            total_unmatched += result["unmatched"]
 
     console.print(f"\n[bold]Total: {total_matched} matched, {total_unmatched} unmatched[/bold]")
     console.print("[green]Done![/green]")
+
+
+def _scrape_and_load_season_roster(
+    engine, league, season, force_refresh,
+    select, player_names_table, TEAM_ABBR_MAP,
+    fetch_season_rosters, match_roster_to_players,
+    get_team_id_to_abbr, load_player_positions,
+) -> dict | None:
+    """Scrape and load roster data for a single season. Returns match counts or None."""
+    console.print(f"Scraping {league.value} S{season} rosters...")
+    roster, team_names = fetch_season_rosters(league, season, force_refresh=force_refresh)
+    if not roster:
+        console.print("  [yellow]No roster data found[/yellow]")
+        return None
+
+    console.print(f"  Found {len(roster)} players across all teams")
+
+    # Build team_id -> abbreviation mapping (primary: DB, fallback: page name)
+    team_id_map = get_team_id_to_abbr(engine, season)
+    for tid, tname in team_names.items():
+        if tid not in team_id_map:
+            abbr = TEAM_ABBR_MAP.get(tname)
+            if abbr:
+                team_id_map[tid] = abbr
+
+    if team_id_map:
+        console.print(f"  Teams: {', '.join(f'{v} (id={k})' for k, v in sorted(team_id_map.items()))}")
+
+    # Load player_names for this season to match against
+    with engine.connect() as conn:
+        pn_rows = conn.execute(
+            select(player_names_table).where(player_names_table.c.season == season)
+        ).fetchall()
+
+    player_names = [
+        {"player_id": r.player_id, "name": r.name, "team": r.team}
+        for r in pn_rows
+    ]
+
+    roster = match_roster_to_players(roster, player_names)
+
+    # Assign team from plays data, not roster page (trade handling)
+    pid_team = {r.player_id: r.team for r in pn_rows if r.team}
+    for entry in roster:
+        pid = entry.get("player_id")
+        if pid and pid in pid_team:
+            entry["team"] = pid_team[pid]
+        elif not entry.get("team"):
+            tid = entry.get("team_id")
+            if tid and tid in team_id_map:
+                entry["team"] = team_id_map[tid]
+
+    result = load_player_positions(engine, roster, season)
+    console.print(f"  Matched: {result['matched']}, Unmatched: {result['unmatched']}")
+    return result
 
 
 @app.command("detect-duplicates")

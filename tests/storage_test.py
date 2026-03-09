@@ -11,21 +11,25 @@ from isfl_epa.players.registry import PlayerRegistry
 from isfl_epa.storage.parquet import write_season_plays, read_season_plays
 
 
+# Use a game ID unlikely to collide with real data
+_TEST_GAME_ID = 9_999_999
+
+
 def _make_game(season=50) -> Game:
     return Game(
-        id=1000, season=season, league="ISFL",
+        id=_TEST_GAME_ID, season=season, league="ISFL",
         home_team="HOM", away_team="AWY",
         home_team_id=1, away_team_id=2,
         plays=[
             ParsedPlay(
-                game_id=1000, quarter=1, clock="10:00",
+                game_id=_TEST_GAME_ID, quarter=1, clock="10:00",
                 play_type=PlayType.PASS,
                 description="Pass by QB, A., complete to WR, B. for 15 yds",
                 passer="QB, A.", receiver="WR, B.",
                 yards_gained=15, possession_team_id=1,
             ),
             ParsedPlay(
-                game_id=1000, quarter=1, clock="9:30",
+                game_id=_TEST_GAME_ID, quarter=1, clock="9:30",
                 play_type=PlayType.RUSH,
                 description="Rush by RB, C. for 5 yds",
                 rusher="RB, C.", yards_gained=5,
@@ -87,9 +91,9 @@ def _pg_available():
         from isfl_epa.storage.database import get_engine
         engine = get_engine()
         with engine.connect() as conn:
-            conn.execute(engine.dialect.do_ping(conn) if hasattr(engine.dialect, 'do_ping') else conn.exec_driver_sql("SELECT 1"))
+            conn.exec_driver_sql("SELECT 1")
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — intentionally broad for test-skip check
         return False
 
 
@@ -97,23 +101,39 @@ def _pg_available():
 class TestPostgreSQL:
     @pytest.fixture(autouse=True)
     def setup_db(self):
-        from isfl_epa.storage.database import get_engine, create_tables, metadata
+        from isfl_epa.storage.database import get_engine, create_tables
         self.engine = get_engine()
         create_tables(self.engine)
+        self._cleanup_test_game()
         yield
-        # Clean up test data
+        self._cleanup_test_game()
+
+    def _cleanup_test_game(self):
+        """Remove any data for the test game ID."""
+        from isfl_epa.storage.database import (
+            plays_table, play_epa_table,
+            player_game_passing_table, player_game_rushing_table,
+            player_game_receiving_table, player_game_defensive_table,
+            team_games_table,
+        )
         with self.engine.begin() as conn:
-            for table in reversed(metadata.sorted_tables):
-                conn.execute(table.delete())
+            conn.execute(play_epa_table.delete().where(
+                play_epa_table.c.game_id == _TEST_GAME_ID))
+            conn.execute(plays_table.delete().where(
+                plays_table.c.game_id == _TEST_GAME_ID))
+            conn.execute(team_games_table.delete().where(
+                team_games_table.c.game_id == _TEST_GAME_ID))
+            for tbl in (player_game_passing_table, player_game_rushing_table,
+                        player_game_receiving_table, player_game_defensive_table):
+                conn.execute(tbl.delete().where(tbl.c.game_id == _TEST_GAME_ID))
 
     def test_load_and_query_plays(self):
         from isfl_epa.storage.database import load_season, query_plays
         game = _make_game()
         registry = PlayerRegistry()
         registry.build_from_games([game])
-
         load_season(self.engine, [game], registry)
-        plays = query_plays(self.engine, game_id=1000)
+        plays = query_plays(self.engine, game_id=_TEST_GAME_ID)
         assert len(plays) == 2
 
     def test_query_by_player_id(self):
@@ -124,6 +144,6 @@ class TestPostgreSQL:
 
         load_season(self.engine, [game], registry)
         pid = registry.get_player_id("QB, A.")
-        plays = query_player_plays(self.engine, pid)
+        plays = query_player_plays(self.engine, pid, game_id=_TEST_GAME_ID)
         assert len(plays) >= 1
         assert plays[0]["passer"] == "QB, A."

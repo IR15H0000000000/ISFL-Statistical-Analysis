@@ -6,11 +6,24 @@ and builds a feature matrix for multinomial classification.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
-from isfl_epa.config import ENGINE_CUTOFF_SEASON
+from isfl_epa.epa.features import (
+    ERA_FEATURE_COLS,
+    FEATURE_COLS,
+    SCRIMMAGE_TYPES,
+    clock_to_seconds,
+    compute_yardline_100,
+    half_number,
+    prepare_features,
+    valid_play_mask,
+)
 from isfl_epa.storage.parquet import DATA_DIR, read_season_plays
+
+logger = logging.getLogger(__name__)
 
 # Next-score labels and their point values (from possession team's perspective)
 LABEL_POINT_VALUES = {
@@ -23,8 +36,8 @@ LABEL_POINT_VALUES = {
     "no_score": 0,
 }
 
-# Play types to include in training (scrimmage plays with game state)
-_SCRIMMAGE_TYPES = {"pass", "rush", "sack", "field_goal"}
+# Keep aliases for backward compatibility (used in calculator.py)
+_SCRIMMAGE_TYPES = SCRIMMAGE_TYPES
 
 # Play types that are never training rows
 _EXCLUDE_TYPES = {
@@ -114,10 +127,12 @@ def _infer_team_mapping(game_df: pd.DataFrame) -> dict:
     """
     team_ids = sorted(game_df["possession_team_id"].dropna().unique())
     if len(team_ids) < 2:
+        logger.warning("_infer_team_mapping: game has < 2 team IDs: %s", team_ids)
         return {}
 
     abbrevs = sorted(game_df["yard_line_team"].dropna().unique())
     if len(abbrevs) < 2:
+        logger.warning("_infer_team_mapping: game has < 2 yard_line_team abbrevs: %s", abbrevs)
         return {}
 
     # Count yard_line_team occurrences for each poss_id on post-kickoff plays
@@ -160,16 +175,19 @@ def _fill_team_info(df: pd.DataFrame) -> pd.DataFrame:
 
         team_ids = sorted(game_plays["possession_team_id"].dropna().unique())
         if len(team_ids) < 2:
+            logger.debug("_fill_team_info: skipping game %s — only %d team IDs", game_id, len(team_ids))
             continue
         away_tid, home_tid = team_ids[0], team_ids[1]
 
         mapping = _infer_team_mapping(game_plays)
         if not mapping:
+            logger.debug("_fill_team_info: skipping game %s — team mapping empty", game_id)
             continue
 
         away_abbr = mapping.get(away_tid)
         home_abbr = mapping.get(home_tid)
         if not away_abbr or not home_abbr:
+            logger.debug("_fill_team_info: skipping game %s — incomplete mapping: %s", game_id, mapping)
             continue
 
         game_mask = df["game_id"] == game_id
@@ -190,28 +208,45 @@ def _fill_team_info(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _derive_possession_team_from_home_away(df: pd.DataFrame) -> pd.Series:
-    """Derive possession_team from home_team/away_team + possession_team_id.
+    """Derive possession_team by intersecting team candidates across games.
 
-    For DB rows (S27-59) that have home_team/away_team but no possession_team.
-    Convention: lower possession_team_id = away, higher = home.
+    Team IDs are FIXED per team across all games in a season.  For each ptid,
+    the correct team is the one that appears in EVERY game where that ptid
+    is used — i.e., the intersection of {home_team, away_team} sets.
     """
-    # Build per-game mapping: home_tid -> home_team, away_tid -> away_team
-    game_info = df.groupby("game_id").agg(
+    game_teams = df.groupby("game_id").agg(
         home_team=("home_team", "first"),
         away_team=("away_team", "first"),
-        min_tid=("possession_team_id", "min"),
-        max_tid=("possession_team_id", "max"),
     )
-    # away = min tid, home = max tid
-    # Create a mapping: (game_id, poss_id) -> team abbreviation
-    # Merge via game_id, then match on poss_id
-    merged = df[["game_id", "possession_team_id"]].merge(game_info, on="game_id", how="left")
-    result = pd.Series(index=df.index, dtype=object)
-    is_home = merged["possession_team_id"] == merged["max_tid"]
-    is_away = merged["possession_team_id"] == merged["min_tid"]
-    result[is_home.values] = merged.loc[is_home.values, "home_team"].values
-    result[is_away.values] = merged.loc[is_away.values, "away_team"].values
-    return result
+
+    ptid_candidates: dict[int, set[str]] = {}
+    for game_id, info in game_teams.iterrows():
+        home, away = info["home_team"], info["away_team"]
+        if not home or not away:
+            continue
+        teams = {home, away}
+        game_ptids = df.loc[
+            (df["game_id"] == game_id) & df["possession_team_id"].notna(),
+            "possession_team_id",
+        ].unique()
+        for ptid in game_ptids:
+            p = int(ptid)
+            if p not in ptid_candidates:
+                ptid_candidates[p] = teams.copy()
+            else:
+                ptid_candidates[p] &= teams
+
+    ptid_to_team = {}
+    for ptid, teams in ptid_candidates.items():
+        if len(teams) == 1:
+            ptid_to_team[ptid] = next(iter(teams))
+        else:
+            logger.warning(
+                "_derive_possession_team: ptid %d has %d candidates %s — skipping",
+                ptid, len(teams), teams,
+            )
+
+    return df["possession_team_id"].map(ptid_to_team)
 
 
 def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
@@ -296,41 +331,14 @@ def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Clock / half utilities
+# Clock / half utilities — imported from features.py, re-exported here
+# for backward compatibility. See isfl_epa.epa.features for implementations.
 # ---------------------------------------------------------------------------
 
+# clock_to_seconds, compute_yardline_100, half_number are imported above
 
-def clock_to_seconds(clock: str, quarter: int) -> int:
-    """Convert clock string and quarter to half_seconds_remaining.
-
-    Q1: clock + 900 (one full quarter left in first half)
-    Q2: clock
-    Q3: clock + 900 (one full quarter left in second half)
-    Q4: clock
-    Q5 (OT): 0
-    """
-    if quarter >= 5:
-        return 0
-    try:
-        parts = str(clock).split(":")
-        minutes = int(parts[0])
-        seconds = int(parts[1]) if len(parts) > 1 else 0
-        clock_secs = minutes * 60 + seconds
-    except (ValueError, IndexError):
-        return 0
-
-    if quarter in (1, 3):
-        return clock_secs + 900
-    return clock_secs
-
-
-def _half_number(quarter: int) -> int:
-    """Map quarter to half: 1/2 -> 1, 3/4 -> 2, OT -> 3."""
-    if quarter <= 2:
-        return 1
-    if quarter <= 4:
-        return 2
-    return 3
+# Keep _half_number alias for internal use
+_half_number = half_number
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +355,16 @@ def label_next_score(df: pd.DataFrame) -> pd.DataFrame:
 
     Adds column: 'next_score_label' (one of the LABEL_POINT_VALUES keys).
     """
-    df = df.copy()
+    # Validate sort order — critical for correct labeling
+    if not df.empty and "play_index" in df.columns:
+        diffs = df.groupby("game_id")["play_index"].diff().dropna()
+        if (diffs < 0).any():
+            logger.warning("label_next_score: DataFrame not sorted by game_id + play_index — sorting now")
+            df = df.sort_values(["game_id", "play_index"]).reset_index(drop=True)
+        else:
+            df = df.copy()
+    else:
+        df = df.copy()
     quarter_vals = df["quarter"].values
     half_vals = np.where(quarter_vals <= 2, 1, np.where(quarter_vals <= 4, 2, 3))
     df["half"] = half_vals
@@ -440,7 +457,16 @@ def label_drive_outcome(df: pd.DataFrame) -> pd.DataFrame:
 
     Adds column: 'drive_points' (float).
     """
-    df = df.copy()
+    # Validate sort order — critical for correct drive segmentation
+    if not df.empty and "play_index" in df.columns:
+        diffs = df.groupby("game_id")["play_index"].diff().dropna()
+        if (diffs < 0).any():
+            logger.warning("label_drive_outcome: DataFrame not sorted by game_id + play_index — sorting now")
+            df = df.sort_values(["game_id", "play_index"]).reset_index(drop=True)
+        else:
+            df = df.copy()
+    else:
+        df = df.copy()
     quarter_vals = df["quarter"].values
     half_vals = np.where(quarter_vals <= 2, 1, np.where(quarter_vals <= 4, 2, 3))
 
@@ -531,86 +557,26 @@ def label_drive_outcome(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def compute_yardline_100(df: pd.DataFrame) -> pd.Series:
-    """Convert yard_line to yards from possession team's own end zone (0-100).
-
-    If yard_line_team matches the possession team's abbreviation, the
-    yardline_100 is the raw yard_line. Otherwise it's 100 - yard_line.
-    """
-    yl = df["yard_line"]
-    same_side = df["yard_line_team"] == df["possession_team"]
-    result = pd.Series(np.where(same_side, yl, 100 - yl), index=df.index)
-    # Null out where inputs are missing
-    missing = df["yard_line"].isna() | df["yard_line_team"].isna() | df["possession_team"].isna()
-    result[missing] = np.nan
-    return result
-
-
 def build_feature_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     """Build feature matrix X and labels y for EP model training.
 
     Filters to scrimmage plays with valid game state, excludes 2-point
     conversions, and constructs features.
     """
-    # Filter to valid scrimmage plays
-    mask = (
-        df["play_type"].isin(_SCRIMMAGE_TYPES)
-        & df["down"].notna()
-        & df["distance"].notna()
-        & df["yard_line"].notna()
-        & df["score_away"].notna()
-        & df["score_home"].notna()
-        & df["next_score_label"].notna()
-        & ~df["description"].str.contains("2 point|conversion", case=False, na=False)
-    )
+    mask = valid_play_mask(df, label_col="next_score_label")
     filtered = df.loc[mask].copy()
+    logger.info("build_feature_matrix: %d -> %d rows after scrimmage filter", len(df), len(filtered))
 
     if filtered.empty:
         return pd.DataFrame(), pd.Series(dtype=str)
 
-    # Compute yardline_100 (vectorized)
-    filtered["yardline_100"] = compute_yardline_100(filtered)
+    filtered = prepare_features(filtered, include_engine_era=True)
     filtered = filtered.dropna(subset=["yardline_100"])
 
     if filtered.empty:
         return pd.DataFrame(), pd.Series(dtype=str)
 
-    # Pre-compute home team ID per game (vectorized lookup)
-    game_home_tid = (
-        filtered.groupby("game_id")["possession_team_id"]
-        .apply(lambda s: max(s.dropna().unique()) if len(s.dropna().unique()) >= 2 else np.nan)
-    )
-    home_tid_col = filtered["game_id"].map(game_home_tid)
-    is_home = (filtered["possession_team_id"] == home_tid_col).astype(int)
-
-    # Score differential (vectorized)
-    sh = filtered["score_home"].fillna(0)
-    sa = filtered["score_away"].fillna(0)
-    score_diff = np.where(is_home, sh - sa, sa - sh)
-
-    filtered["score_differential"] = pd.Series(score_diff, index=filtered.index).clip(-28, 28)
-    filtered["is_home"] = is_home.values
-
-    # Half seconds remaining (vectorized)
-    clock_parts = filtered["clock"].astype(str).str.split(":", expand=True)
-    minutes = pd.to_numeric(clock_parts[0], errors="coerce").fillna(0).astype(int)
-    seconds = pd.to_numeric(clock_parts[1], errors="coerce").fillna(0).astype(int) if 1 in clock_parts.columns else 0
-    clock_secs = minutes * 60 + seconds
-    quarter = filtered["quarter"]
-    half_secs = np.where(quarter.isin([1, 3]), clock_secs + 900, clock_secs)
-    half_secs = np.where(quarter >= 5, 0, half_secs)
-    filtered["half_seconds_remaining"] = half_secs
-
-    filtered["is_overtime"] = (quarter >= 5).astype(int)
-    filtered["engine_era"] = (filtered["season"] >= ENGINE_CUTOFF_SEASON).astype(int)
-
-    feature_cols = [
-        "down", "distance", "yardline_100", "score_differential",
-        "half_seconds_remaining", "is_home", "is_overtime", "engine_era",
-    ]
-
-    X = filtered[feature_cols].copy()
-    X["distance"] = X["distance"].clip(upper=30)
+    X = filtered[FEATURE_COLS].copy()
     y = filtered["next_score_label"]
 
     return X, y
@@ -626,7 +592,7 @@ def build_era_feature_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]
 
 def build_drive_feature_matrix(
     df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.Series, np.ndarray]:
+) -> tuple[pd.DataFrame, pd.Series, np.ndarray, np.ndarray]:
     """Build feature matrix with drive_points as continuous target.
 
     Like build_feature_matrix but:
@@ -635,61 +601,20 @@ def build_drive_feature_matrix(
     - Returns sample weights (1/drive_length) so each drive contributes equally
     - Drops engine_era (for era-specific models)
     """
-    mask = (
-        df["play_type"].isin(_SCRIMMAGE_TYPES)
-        & df["down"].notna()
-        & df["distance"].notna()
-        & df["yard_line"].notna()
-        & df["score_away"].notna()
-        & df["score_home"].notna()
-        & df["drive_points"].notna()
-        & ~df["description"].str.contains("2 point|conversion", case=False, na=False)
-    )
+    mask = valid_play_mask(df, label_col="drive_points")
     filtered = df.loc[mask].copy()
+    logger.info("build_drive_feature_matrix: %d -> %d rows after scrimmage filter", len(df), len(filtered))
 
     if filtered.empty:
-        return pd.DataFrame(), pd.Series(dtype=float), np.array([])
+        return pd.DataFrame(), pd.Series(dtype=float), np.array([]), np.array([], dtype=bool)
 
-    filtered["yardline_100"] = compute_yardline_100(filtered)
+    filtered = prepare_features(filtered, include_engine_era=False)
     filtered = filtered.dropna(subset=["yardline_100"])
 
     if filtered.empty:
-        return pd.DataFrame(), pd.Series(dtype=float), np.array([])
+        return pd.DataFrame(), pd.Series(dtype=float), np.array([]), np.array([], dtype=bool)
 
-    # Home team ID per game
-    game_home_tid = (
-        filtered.groupby("game_id")["possession_team_id"]
-        .apply(lambda s: max(s.dropna().unique()) if len(s.dropna().unique()) >= 2 else np.nan)
-    )
-    home_tid_col = filtered["game_id"].map(game_home_tid)
-    is_home = (filtered["possession_team_id"] == home_tid_col).astype(int)
-
-    # Score differential
-    sh = filtered["score_home"].fillna(0)
-    sa = filtered["score_away"].fillna(0)
-    score_diff = np.where(is_home, sh - sa, sa - sh)
-    filtered["score_differential"] = pd.Series(score_diff, index=filtered.index).clip(-28, 28)
-    filtered["is_home"] = is_home.values
-
-    # Half seconds remaining
-    clock_parts = filtered["clock"].astype(str).str.split(":", expand=True)
-    minutes = pd.to_numeric(clock_parts[0], errors="coerce").fillna(0).astype(int)
-    seconds = pd.to_numeric(clock_parts[1], errors="coerce").fillna(0).astype(int) if 1 in clock_parts.columns else 0
-    clock_secs = minutes * 60 + seconds
-    quarter = filtered["quarter"]
-    half_secs = np.where(quarter.isin([1, 3]), clock_secs + 900, clock_secs)
-    half_secs = np.where(quarter >= 5, 0, half_secs)
-    filtered["half_seconds_remaining"] = half_secs
-
-    filtered["is_overtime"] = (quarter >= 5).astype(int)
-
-    feature_cols = [
-        "down", "distance", "yardline_100", "score_differential",
-        "half_seconds_remaining", "is_home", "is_overtime",
-    ]
-
-    X = filtered[feature_cols].copy()
-    X["distance"] = X["distance"].clip(upper=30)
+    X = filtered[ERA_FEATURE_COLS].copy()
     y = filtered["drive_points"].astype(float)
 
     # Compute drive IDs and sample weights

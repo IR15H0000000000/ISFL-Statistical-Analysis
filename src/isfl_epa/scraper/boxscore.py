@@ -1,15 +1,17 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 
-import requests
 from lzstring import LZString
 
 from isfl_epa.config import (
     BOXSCORE_FILES_PER_SEASON,
     League,
+    SCRAPER_MAX_WORKERS,
     get_boxscore_file_num,
     get_boxscore_url,
 )
 from isfl_epa.scraper.cache import get_cached, save_to_cache
+from isfl_epa.scraper.http import get_session
 
 _lz = LZString()
 
@@ -24,7 +26,7 @@ def fetch_boxscore_file(
             return cached
 
     url = get_boxscore_url(league, season, file_num)
-    resp = requests.get(url, timeout=30)
+    resp = get_session().get(url, timeout=30)
     resp.raise_for_status()
 
     text = resp.content.decode("utf-8-sig")
@@ -52,11 +54,16 @@ def fetch_boxscore(
 def fetch_all_season_boxscores(
     league: League, season: int, *, force_refresh: bool = False
 ) -> list[dict]:
-    """Fetch all boxscore data for an entire season."""
+    """Fetch all boxscore data for an entire season (concurrent)."""
     all_games = []
-    for file_num in range(1, BOXSCORE_FILES_PER_SEASON + 1):
-        games = fetch_boxscore_file(
-            league, season, file_num, force_refresh=force_refresh
-        )
-        all_games.extend(games)
+    with ThreadPoolExecutor(max_workers=SCRAPER_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(fetch_boxscore_file, league, season, fn, force_refresh=force_refresh): fn
+            for fn in range(1, BOXSCORE_FILES_PER_SEASON + 1)
+        }
+        results = {fn: f.result() for f, fn in sorted(
+            ((f, fn) for f, fn in futures.items()), key=lambda x: x[1]
+        )}
+    for fn in range(1, BOXSCORE_FILES_PER_SEASON + 1):
+        all_games.extend(results[fn])
     return all_games

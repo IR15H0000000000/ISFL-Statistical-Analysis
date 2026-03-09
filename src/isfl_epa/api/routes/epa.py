@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query, Request
 from sqlalchemy import case, cast, desc, func, literal_column, select, Float
 
 from isfl_epa.storage.database import (
+    get_team_id_to_abbr,
     play_epa_table,
     player_game_defensive_table,
     player_game_passing_table,
@@ -179,42 +180,6 @@ def available_seasons(request: Request):
     )
     with engine.connect() as conn:
         return [row[0] for row in conn.execute(stmt)]
-
-
-def _team_name_cte(season: int):
-    """Build a CTE that maps (game_id, possession_team_id) → team name.
-
-    Uses team_games (populated for all seasons) to get home/away team names,
-    then matches against the convention: lower possession_team_id = away,
-    higher = home.
-    """
-    p = plays_table
-    # Get min/max possession_team_id per game to determine home/away
-    game_teams = (
-        select(
-            p.c.game_id,
-            func.min(p.c.possession_team_id).label("away_tid"),
-            func.max(p.c.possession_team_id).label("home_tid"),
-        )
-        .where(p.c.season == season)
-        .where(p.c.possession_team_id.isnot(None))
-        .group_by(p.c.game_id)
-    ).cte("game_teams")
-
-    tg = team_games_table
-    home = (
-        select(tg.c.game_id, tg.c.team.label("home_team"))
-        .where(tg.c.season == season)
-        .where(tg.c.is_home.is_(True))
-    ).cte("home_teams")
-
-    away = (
-        select(tg.c.game_id, tg.c.team.label("away_team"))
-        .where(tg.c.season == season)
-        .where(tg.c.is_home.is_(False))
-    ).cte("away_teams")
-
-    return game_teams, home, away
 
 
 def _success_check():
@@ -393,44 +358,27 @@ def _defensive_dashboard(engine, season: int) -> list[dict]:
 
 
 def _resolve_possession_team(conn, season: int):
-    """Return a dict mapping (game_id, possession_team_id) → team_name."""
-    p = plays_table
-    tg = team_games_table
+    """Return a dict mapping (game_id, possession_team_id) → team_name.
 
-    # Get min/max possession_team_id per game
-    game_teams_stmt = (
-        select(
-            p.c.game_id,
-            func.min(p.c.possession_team_id).label("away_tid"),
-            func.max(p.c.possession_team_id).label("home_tid"),
-        )
+    Uses intersection-based team_id → abbreviation mapping from
+    get_team_id_to_abbr, then expands to per-game mapping.
+    """
+    engine = conn.engine
+    ptid_to_team = get_team_id_to_abbr(engine, season)
+
+    # Build per-game mapping from the global ptid → team map
+    p = plays_table
+    game_ptids_stmt = (
+        select(p.c.game_id, p.c.possession_team_id)
         .where(p.c.season == season)
         .where(p.c.possession_team_id.isnot(None))
-        .group_by(p.c.game_id)
+        .distinct()
     )
-    game_tid = {row.game_id: (row.away_tid, row.home_tid) for row in conn.execute(game_teams_stmt)}
-
-    # Get home/away team names from team_games
-    tg_stmt = (
-        select(tg.c.game_id, tg.c.team, tg.c.is_home)
-        .where(tg.c.season == season)
-    )
-    game_names = {}
-    for row in conn.execute(tg_stmt):
-        game_names.setdefault(row.game_id, {})
-        if row.is_home:
-            game_names[row.game_id]["home"] = row.team
-        else:
-            game_names[row.game_id]["away"] = row.team
-
-    # Build mapping: (game_id, tid) → team_name
     mapping = {}
-    for gid, (away_tid, home_tid) in game_tid.items():
-        names = game_names.get(gid, {})
-        if "away" in names:
-            mapping[(gid, away_tid)] = names["away"]
-        if "home" in names:
-            mapping[(gid, home_tid)] = names["home"]
+    for row in conn.execute(game_ptids_stmt):
+        team = ptid_to_team.get(int(row.possession_team_id))
+        if team:
+            mapping[(row.game_id, row.possession_team_id)] = team
 
     return mapping
 

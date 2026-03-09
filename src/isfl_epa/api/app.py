@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from isfl_epa.logging_config import setup_logging
+
+    setup_logging()
     engine = get_engine()
     create_tables(engine)
     app.state.engine = engine

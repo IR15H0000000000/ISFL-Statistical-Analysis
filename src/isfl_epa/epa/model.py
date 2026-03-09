@@ -25,7 +25,7 @@ from sklearn.preprocessing import StandardScaler
 
 from isfl_epa.epa.dataset import LABEL_POINT_VALUES
 
-MODEL_DIR = Path("data/models")
+MODEL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "models"
 DEFAULT_MODEL_PATH = MODEL_DIR / "ep_model.joblib"
 MODEL_2016_PATH = MODEL_DIR / "ep_model_2016.joblib"
 MODEL_2022_PATH = MODEL_DIR / "ep_model_2022.joblib"
@@ -62,12 +62,19 @@ class EPModel:
         self.model_type = model_type
 
         if model_type == "hgb_reg":
+            from isfl_epa.config import (
+                EPA_MODEL_LEARNING_RATE,
+                EPA_MODEL_MAX_DEPTH,
+                EPA_MODEL_MAX_ITER,
+                EPA_MODEL_MIN_SAMPLES_LEAF,
+            )
+
             self.scaler = None
             self.model = HistGradientBoostingRegressor(
-                max_iter=200,
-                max_depth=6,
-                learning_rate=0.1,
-                min_samples_leaf=100,
+                max_iter=EPA_MODEL_MAX_ITER,
+                max_depth=EPA_MODEL_MAX_DEPTH,
+                learning_rate=EPA_MODEL_LEARNING_RATE,
+                min_samples_leaf=EPA_MODEL_MIN_SAMPLES_LEAF,
                 random_state=42,
             )
             self.model.fit(X, y, sample_weight=sample_weight)
@@ -80,11 +87,18 @@ class EPModel:
             }
 
         if model_type == "hgb":
+            from isfl_epa.config import (
+                EPA_MODEL_LEARNING_RATE,
+                EPA_MODEL_MAX_DEPTH,
+                EPA_MODEL_MAX_ITER,
+                EPA_MODEL_MIN_SAMPLES_LEAF,
+            )
+
             base = HistGradientBoostingClassifier(
-                max_iter=200,
-                max_depth=6,
-                learning_rate=0.1,
-                min_samples_leaf=100,
+                max_iter=EPA_MODEL_MAX_ITER,
+                max_depth=EPA_MODEL_MAX_DEPTH,
+                learning_rate=EPA_MODEL_LEARNING_RATE,
+                min_samples_leaf=EPA_MODEL_MIN_SAMPLES_LEAF,
                 random_state=42,
             )
             self.scaler = None

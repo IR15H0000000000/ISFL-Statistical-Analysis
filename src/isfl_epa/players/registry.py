@@ -12,26 +12,97 @@ The registry can operate in two modes:
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 _OVERRIDES_PATH = Path(__file__).parent / "overrides.yaml"
+
+
+def _strip_tags(name: str) -> str:
+    """Remove parenthetical tags (C), (R), (BOT) etc., preserving case and format.
+
+    'Penix (C) (R), P.' -> 'Penix, P.'
+    'Abstract Geometry (R)' -> 'Abstract Geometry'
+    """
+    s = re.sub(r"\s*\([^)]*\)", "", name)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _strip_special(name: str) -> str:
+    """Remove trademark, copyright, and other non-alphanumeric decorators."""
+    return re.sub(r"[™®©]", "", name)
 
 
 def _normalize(name: str) -> str:
     """Normalize a player name for matching.
 
-    Strips trailing dots, normalizes whitespace around commas,
-    and lowercases. This ensures 'Smith, J.' and 'Smith, J'
-    map to the same key.
+    Strips parenthetical tags like (C), (R), (BOT), special chars (™),
+    trailing dots, normalizes whitespace around commas, and lowercases.
+    This ensures 'Penix (C) (R), P.' and 'Penix, P' map to the same key.
     """
-    s = name.strip().lower()
+    s = _strip_tags(name)
+    s = _strip_special(s)
+    s = s.lower()
     s = s.rstrip(".")
     s = re.sub(r"\s*,\s*", ", ", s)
     s = re.sub(r"\s+", " ", s)
     return s
+
+
+def _to_last_first_key(name: str) -> str | None:
+    """Convert 'First Last' format to 'last, f' for cross-format matching.
+
+    The sim PBP convention is 'LastName, F.' where F is the first name initial.
+    For multi-word names, the LAST word is treated as the last name:
+      'Jean Claude Goddamn' -> 'goddamn, j'
+      'Peaquod Von Turbo'   -> 'von turbo, p'
+
+    We try two strategies:
+    1. Last word only as last name (matches PBP convention for most names)
+    2. All words after first as last name (matches multi-word last names)
+
+    Returns None if already in 'Last, F.' format or can't be parsed.
+    """
+    s = _strip_tags(name)
+    s = _strip_special(s)
+    if "," in s:
+        return None  # Already "Last, F." format
+    parts = s.split()
+    if len(parts) < 2:
+        return None
+    first_initial = parts[0][0].lower()
+    # Primary: all-after-first as last name (for "Von Turbo, P." style)
+    # Preserve internal dots (e.g., "Jr.") — _normalize handles final dot stripping
+    last_full = " ".join(parts[1:]).lower()
+    # Only strip trailing dot if it's NOT part of a suffix like "Jr."
+    if last_full.endswith(".") and not last_full.endswith("jr."):
+        last_full = last_full.rstrip(".")
+    return f"{last_full}, {first_initial}"
+
+
+def _to_last_first_key_short(name: str) -> str | None:
+    """Convert 'First Middle Last' to 'last, f' using only the last word.
+
+    Handles cases like 'Jean Claude Goddamn' -> 'goddamn, j' where PBP
+    only uses the final word as the last name.
+    """
+    s = _strip_tags(name)
+    s = _strip_special(s)
+    s = s.rstrip(".")
+    if "," in s:
+        return None
+    parts = s.split()
+    if len(parts) < 3:
+        return None  # Only useful for 3+ word names
+    first_initial = parts[0][0].lower()
+    last_word = parts[-1].lower()
+    return f"{last_word}, {first_initial}"
 
 
 class PlayerRegistry:
@@ -67,38 +138,61 @@ class PlayerRegistry:
         Matching strategy:
         1. Exact normalized name match in existing registry
         2. Override file alias match
-        3. Create new player
+        3. Cross-format match ("First Last" ↔ "Last, F.")
+        4. Create new player
         """
+        clean = _strip_special(_strip_tags(name))
         norm = _normalize(name)
 
         # Check overrides to resolve to canonical name
         resolved = self._overrides.get(norm, norm)
+        if resolved != norm:
+            logger.debug("Override resolved '%s' -> '%s'", norm, resolved)
 
         # Check if we already have this name
         if resolved in self._name_to_id:
             pid = self._name_to_id[resolved]
-            self._update_player(pid, name, season, team)
-            # Also register the original name if it differs
+            self._update_player(pid, clean, season, team)
             if norm != resolved and norm not in self._name_to_id:
                 self._name_to_id[norm] = pid
+            return pid
+
+        # Cross-format match: "Peaquod Von Turbo" ↔ "Von Turbo, P."
+        alt_key = _to_last_first_key(name)
+        if alt_key and alt_key in self._name_to_id:
+            pid = self._name_to_id[alt_key]
+            self._update_player(pid, clean, season, team)
+            self._name_to_id[norm] = pid
+            return pid
+
+        # Short cross-format: "Jean Claude Goddamn" ↔ "Goddamn, J."
+        short_key = _to_last_first_key_short(name)
+        if short_key and short_key in self._name_to_id:
+            pid = self._name_to_id[short_key]
+            self._update_player(pid, clean, season, team)
+            self._name_to_id[norm] = pid
             return pid
 
         # Create new player
         pid = self._next_id
         self._next_id += 1
+        logger.debug("New player id=%d name='%s' season=%d", pid, clean, season)
         self._name_to_id[resolved] = pid
         if norm != resolved:
             self._name_to_id[norm] = pid
         self._players[pid] = {
-            "canonical_name": name,
+            "canonical_name": clean,
             "first_seen_season": season,
             "last_seen_season": season,
         }
-        self._aliases[pid] = [{"name": name, "season": season, "team": team}]
+        self._aliases[pid] = [{"name": clean, "season": season, "team": team}]
         return pid
 
     def _update_player(self, pid: int, name: str, season: int, team: str | None) -> None:
-        """Update an existing player's metadata."""
+        """Update an existing player's metadata.
+
+        Note: ``name`` should already be tag-stripped by the caller.
+        """
         p = self._players[pid]
         if season < p["first_seen_season"]:
             p["first_seen_season"] = season
@@ -148,13 +242,26 @@ class PlayerRegistry:
         """Register all player names found in parsed games."""
         for game in games:
             for play in game.plays:
-                team_abbr = self._play_team(game, play)
-                for field in ("passer", "rusher", "receiver", "tackler",
-                              "sacker", "interceptor", "kicker", "returner",
-                              "fumbler", "fumble_recoverer"):
+                off_team = self._play_team(game, play)
+                def_team = self._non_possession_team(game, play)
+                # Offensive players: possession team
+                for field in ("passer", "rusher", "receiver", "kicker"):
                     name = getattr(play, field, None)
                     if name:
-                        self.get_or_create(name, game.season, team_abbr)
+                        self.get_or_create(name, game.season, off_team)
+                # Defensive players: non-possession team
+                for field in ("tackler", "sacker", "interceptor"):
+                    name = getattr(play, field, None)
+                    if name:
+                        self.get_or_create(name, game.season, def_team)
+                # Returner: receiving team (non-possession on kick plays)
+                if play.returner:
+                    self.get_or_create(play.returner, game.season, def_team)
+                # Fumbler/fumble_recoverer: ambiguous, use None
+                for field in ("fumbler", "fumble_recoverer"):
+                    name = getattr(play, field, None)
+                    if name:
+                        self.get_or_create(name, game.season, None)
 
     @staticmethod
     def _play_team(game, play) -> str | None:
@@ -166,6 +273,18 @@ class PlayerRegistry:
             return game.home_team
         if tid == game.away_team_id:
             return game.away_team
+        return None
+
+    @staticmethod
+    def _non_possession_team(game, play) -> str | None:
+        """Determine team abbreviation for the non-possession (defensive) team."""
+        tid = play.possession_team_id
+        if tid is None:
+            return None
+        if tid == game.home_team_id:
+            return game.away_team
+        if tid == game.away_team_id:
+            return game.home_team
         return None
 
     @property
