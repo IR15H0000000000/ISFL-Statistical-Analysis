@@ -202,9 +202,15 @@
 </header>
 
 <div class="controls">
-  <div>
-    <label for="season-select">Season: </label>
-    <select id="season-select" onchange="loadData()"></select>
+  <div style="display:flex;align-items:center;gap:1rem">
+    <div>
+      <label for="season-select">Season: </label>
+      <select id="season-select" onchange="loadData()"></select>
+    </div>
+    <div class="mode-toggle" style="display:inline-flex;gap:0">
+      <button id="gt-regular" class="active" onclick="switchGameType('regular')" style="padding:0.4rem 1rem;border:1px solid #ccc;border-radius:4px 0 0 4px;background:#1a1a2e;color:#fff;font-size:0.8rem;cursor:pointer;font-weight:600">Regular Season</button>
+      <button id="gt-playoff" onclick="switchGameType('playoff')" style="padding:0.4rem 1rem;border:1px solid #ccc;border-left:none;border-radius:0 4px 4px 0;background:#fff;color:#666;font-size:0.8rem;cursor:pointer;font-weight:600">Playoffs</button>
+    </div>
   </div>
   <div class="updated" id="update-info"></div>
 </div>
@@ -264,6 +270,7 @@ const DEFENSIVE_COLUMNS = [
 
 let currentData = [];
 let currentSide = "offensive";
+let currentGameType = "regular";
 let sortKey = "epa_per_play";
 let sortAsc = false;
 
@@ -401,6 +408,17 @@ function switchSide(side) {
   loadData();
 }
 
+function switchGameType(gt) {
+  currentGameType = gt;
+  const regBtn = document.getElementById("gt-regular");
+  const playBtn = document.getElementById("gt-playoff");
+  regBtn.style.background = gt === "regular" ? "#1a1a2e" : "#fff";
+  regBtn.style.color = gt === "regular" ? "#fff" : "#666";
+  playBtn.style.background = gt === "playoff" ? "#1a1a2e" : "#fff";
+  playBtn.style.color = gt === "playoff" ? "#fff" : "#666";
+  loadData();
+}
+
 async function loadData() {
   const season = document.getElementById("season-select").value;
   if (!season) return;
@@ -409,7 +427,7 @@ async function loadData() {
   document.getElementById("stats-table").style.display = "none";
 
   try {
-    const resp = await fetch(`/epa/team-dashboard?season=${season}&side=${currentSide}`);
+    const resp = await fetch(`/epa/team-dashboard?season=${season}&side=${currentSide}&game_type=${currentGameType}`);
     currentData = await resp.json();
     renderTable();
   } catch (e) {

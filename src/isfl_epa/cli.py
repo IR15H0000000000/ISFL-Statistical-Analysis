@@ -153,6 +153,15 @@ def build(
     games = [parse_game(g, season, league.value) for g in raw_games]
     console.print(f"  Parsed {len(games)} games")
 
+    # Classify game types (preseason / regular / playoff)
+    from isfl_epa.scraper.game_results import fetch_game_type_mapping
+    game_type_map = fetch_game_type_mapping(league, season)
+    for game in games:
+        game.game_type = game_type_map.get(game.id, "regular")
+    from collections import Counter
+    gt_counts = Counter(g.game_type for g in games)
+    console.print(f"  Game types: {dict(gt_counts)}")
+
     # Set up DB and seed registry with existing players so IDs are stable across seasons
     engine = get_engine(database_url)
     create_tables(engine)
@@ -939,6 +948,76 @@ def _format_timestamp(iso_str: str) -> str:
         return dt.strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
         return iso_str
+
+
+@app.command("backfill-game-types")
+def backfill_game_types(
+    league: League = typer.Option(League.ISFL, help="League"),
+    season: int = typer.Option(None, help="Single season to backfill"),
+    season_range: str = typer.Option(None, help="Season range, e.g. '1-59'"),
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Backfill game_type (preseason/regular/playoff) for existing data."""
+    from collections import Counter
+
+    from sqlalchemy import text as sql_text
+
+    from isfl_epa.scraper.game_results import fetch_game_type_mapping
+    from isfl_epa.storage.database import (
+        create_tables,
+        games_table,
+        get_engine,
+    )
+
+    seasons = _parse_season_args(season, season_range)
+    engine = get_engine(database_url)
+    create_tables(engine)
+
+    # Add game_type columns if they don't exist (migration for existing DBs)
+    _tables_needing_game_type = [
+        "plays", "team_games", "player_game_passing", "player_game_rushing",
+        "player_game_receiving", "player_game_defensive",
+        "player_season_epa", "team_season_epa",
+    ]
+    with engine.begin() as conn:
+        for tbl in _tables_needing_game_type:
+            conn.execute(sql_text(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS game_type VARCHAR(20) DEFAULT 'regular'"
+            ))
+
+    total_counts: Counter = Counter()
+    for s in seasons:
+        mapping = fetch_game_type_mapping(league, s)
+        counts = Counter(mapping.values())
+        total_counts += counts
+        console.print(f"  S{s}: {dict(counts)} ({len(mapping)} games)")
+
+        with engine.begin() as conn:
+            # Upsert into games table
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            from sqlalchemy import insert
+
+            for game_id, game_type in mapping.items():
+                conn.execute(
+                    pg_insert(games_table).values(
+                        game_id=game_id, season=s, league=league.value, game_type=game_type,
+                    ).on_conflict_do_update(
+                        index_elements=["game_id"],
+                        set_={"game_type": game_type},
+                    )
+                )
+
+            # Update game_type on per-game tables
+            for tbl in _tables_needing_game_type:
+                if tbl in ("player_season_epa", "team_season_epa"):
+                    continue  # aggregation tables - need EPA recompute
+                for game_id, game_type in mapping.items():
+                    conn.execute(sql_text(
+                        f"UPDATE {tbl} SET game_type = :gt WHERE game_id = :gid"
+                    ), {"gt": game_type, "gid": game_id})
+
+    console.print(f"\n[green]Backfill complete: {dict(total_counts)}[/green]")
+    console.print("[yellow]Run compute-epa for each season to regenerate EPA with game_type separation.[/yellow]")
 
 
 if __name__ == "__main__":

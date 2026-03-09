@@ -266,6 +266,11 @@
     <button id="mode-alltime" onclick="switchMode('alltime')">All-Time</button>
   </div>
 
+  <div class="mode-toggle">
+    <button id="gt-regular" class="active" onclick="switchGameType('regular')" style="font-size:0.75rem;padding:0.4rem 0.8rem">Regular</button>
+    <button id="gt-playoff" onclick="switchGameType('playoff')" style="font-size:0.75rem;padding:0.4rem 0.8rem">Playoffs</button>
+  </div>
+
   <div class="control-group" id="season-single-ctrl">
     <label for="season-select">Season:</label>
     <select id="season-select" onchange="loadData()"></select>
@@ -409,6 +414,7 @@ const DEFAULT_MIN = {
 
 let currentCategory = "passing";
 let currentMode = "season"; // season, career, seasons
+let currentGameType = "regular";
 let currentData = [];
 let sortKey = "epa_per_dropback";
 let sortAsc = false;
@@ -587,6 +593,13 @@ function switchView(view) {
   loadData();
 }
 
+function switchGameType(gt) {
+  currentGameType = gt;
+  document.getElementById("gt-regular").classList.toggle("active", gt === "regular");
+  document.getElementById("gt-playoff").classList.toggle("active", gt === "playoff");
+  loadData();
+}
+
 async function loadData() {
   document.getElementById("loading").style.display = "";
   document.getElementById("stats-table").style.display = "none";
@@ -594,6 +607,7 @@ async function loadData() {
   const params = new URLSearchParams();
   params.set("category", currentCategory);
   params.set("mode", currentMode);
+  params.set("game_type", currentGameType);
   params.set("limit", "100");
 
   if (currentMode === "season") {

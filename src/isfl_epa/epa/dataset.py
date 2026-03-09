@@ -249,6 +249,29 @@ def _derive_possession_team_from_home_away(df: pd.DataFrame) -> pd.Series:
     return df["possession_team_id"].map(ptid_to_team)
 
 
+def _filter_preseason_from_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove preseason game_ids from a parquet-loaded DataFrame using the games table."""
+    try:
+        from sqlalchemy import select
+        from isfl_epa.storage.database import get_engine, games_table
+
+        engine = get_engine()
+        game_ids = df["game_id"].unique().tolist()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(games_table.c.game_id)
+                .where(games_table.c.game_id.in_(game_ids))
+                .where(games_table.c.game_type == "preseason")
+            ).fetchall()
+        preseason_ids = {r.game_id for r in rows}
+        if preseason_ids:
+            logger.info("Filtering %d preseason games from parquet data", len(preseason_ids))
+            df = df[~df["game_id"].isin(preseason_ids)]
+    except Exception:
+        logger.warning("Could not filter preseason from parquet (games table may not exist yet)")
+    return df
+
+
 def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
     """Load and concatenate plays from Parquet and/or database.
 
@@ -262,13 +285,18 @@ def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
     db_seasons = []
 
     for s in seasons:
-        path = DATA_DIR / f"{league}_S{s}_plays.parquet"
-        if path.exists():
-            parquet_frames.append(read_season_plays(s, league))
-        else:
+        # S27+ always load from DB (preserves play `id` for play_epa table).
+        # Parquets are only the primary source for S1-26.
+        if s >= 27:
             db_seasons.append(s)
+        else:
+            path = DATA_DIR / f"{league}_S{s}_plays.parquet"
+            if path.exists():
+                parquet_frames.append(read_season_plays(s, league))
+            else:
+                db_seasons.append(s)
 
-    # Load DB seasons (single query for all seasons)
+    # Load DB seasons (single query for all seasons, excluding preseason)
     db_frames = []
     if db_seasons:
         from sqlalchemy import select
@@ -282,6 +310,7 @@ def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
                 .where(
                     plays_table.c.season.in_(db_seasons)
                     & (plays_table.c.league == league)
+                    & (plays_table.c.game_type != "preseason")
                 )
                 .order_by(
                     plays_table.c.game_id,
@@ -295,6 +324,8 @@ def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
     # Process parquet data (S1-26): reconstruct scores + infer teams
     if parquet_frames:
         pq_df = pd.concat(parquet_frames, ignore_index=True)
+        # Filter out preseason games using the games table
+        pq_df = _filter_preseason_from_parquet(pq_df)
         if pq_df["score_away"].isna().any():
             pq_df = _reconstruct_scores_df(pq_df)
         if "possession_team" not in pq_df.columns:

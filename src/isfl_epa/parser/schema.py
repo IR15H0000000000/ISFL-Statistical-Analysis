@@ -77,4 +77,5 @@ class Game(BaseModel):
     away_team: str | None = None
     home_team_id: int | None = None
     away_team_id: int | None = None
+    game_type: str = "regular"  # "preseason", "regular", or "playoff"
     plays: list[ParsedPlay]
