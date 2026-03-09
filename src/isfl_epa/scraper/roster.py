@@ -11,8 +11,11 @@ from urllib.parse import parse_qs, urlparse
 from bs4 import BeautifulSoup
 
 from isfl_epa.config import League, SCRAPER_MAX_WORKERS, get_roster_url
+from isfl_epa.logging_config import get_logger
 from isfl_epa.scraper.cache import get_cached, save_to_cache
 from isfl_epa.scraper.http import get_session
+
+logger = get_logger("scraper.roster")
 
 # Positions to normalize to OL
 _OL_POSITIONS = {"T", "C", "G"}
@@ -286,7 +289,8 @@ def fetch_team_roster(
     try:
         resp = get_session().get(url, timeout=30)
         resp.raise_for_status()
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to fetch roster for %s S%d team %d: %s", league.value, season, team_id, e)
         return [], None
 
     players, team_name = _parse_roster_html(resp.text)

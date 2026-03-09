@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -7,6 +8,26 @@ from isfl_epa.config import League
 
 app = typer.Typer(help="ISFL play-by-play analyzer and EPA calculator")
 console = Console()
+
+
+def _parse_season_args(
+    season: int | None,
+    season_range: str | None,
+) -> list[int]:
+    """Parse --season / --season-range into a list of season numbers."""
+    if season is not None and season_range is not None:
+        console.print("[red]Provide --season or --season-range, not both[/red]")
+        raise typer.Exit(1)
+    if season is not None:
+        return [season]
+    if season_range is not None:
+        parts = season_range.split("-")
+        if len(parts) != 2:
+            console.print("[red]--season-range must be 'START-END', e.g. '50-59'[/red]")
+            raise typer.Exit(1)
+        return list(range(int(parts[0]), int(parts[1]) + 1))
+    console.print("[red]Provide --season or --season-range[/red]")
+    raise typer.Exit(1)
 
 
 @app.callback()
@@ -29,15 +50,34 @@ def main(
 @app.command()
 def scrape(
     league: League = typer.Option(League.ISFL, help="League to scrape"),
-    season: int = typer.Option(..., help="Season number"),
+    season: int = typer.Option(None, help="Season number"),
+    season_range: str = typer.Option(None, help="Season range, e.g. '50-59'"),
     force_refresh: bool = typer.Option(False, help="Re-download even if cached"),
+    refresh_last: int = typer.Option(0, help="Only re-download last N data files (S27+ JSON era)"),
 ):
     """Download and cache PBP and boxscore data for a season."""
+    from rich.progress import track
+
     from isfl_epa.config import ENGINE_CUTOFF_SEASON
 
-    console.print(f"Scraping {league.value} Season {season}...")
+    seasons = _parse_season_args(season, season_range)
 
-    if season < ENGINE_CUTOFF_SEASON:
+    for s in track(seasons, description="Scraping...", disable=len(seasons) == 1):
+        console.print(f"Scraping {league.value} Season {s}...")
+        _scrape_season(league, s, force_refresh, refresh_last, ENGINE_CUTOFF_SEASON)
+
+    console.print("[green]Done![/green]")
+
+
+def _scrape_season(
+    league: League,
+    season: int,
+    force_refresh: bool,
+    refresh_last: int,
+    engine_cutoff: int,
+) -> None:
+    """Scrape PBP + boxscore data for a single season."""
+    if season < engine_cutoff:
         from isfl_epa.scraper.boxscore_html import fetch_all_season_boxscores_html
         from isfl_epa.scraper.pbp_html import fetch_all_season_pbp_html
 
@@ -50,13 +90,15 @@ def scrape(
         from isfl_epa.scraper.boxscore import fetch_all_season_boxscores
         from isfl_epa.scraper.pbp import fetch_all_season_pbp
 
-        games = fetch_all_season_pbp(league, season, force_refresh=force_refresh)
+        games = fetch_all_season_pbp(
+            league, season, force_refresh=force_refresh, refresh_last=refresh_last,
+        )
         console.print(f"  PBP: {len(games)} games")
 
-        boxscores = fetch_all_season_boxscores(league, season, force_refresh=force_refresh)
+        boxscores = fetch_all_season_boxscores(
+            league, season, force_refresh=force_refresh, refresh_last=refresh_last,
+        )
         console.print(f"  Boxscores: {len(boxscores)} games")
-
-    console.print("[green]Done![/green]")
 
 
 @app.command()
@@ -610,15 +652,7 @@ def scrape_rosters(
         player_names_table,
     )
 
-    if season is None and season_range is None:
-        console.print("[red]Provide --season or --season-range[/red]")
-        raise typer.Exit(1)
-
-    if season_range:
-        parts = season_range.split("-")
-        seasons = list(range(int(parts[0]), int(parts[1]) + 1))
-    else:
-        seasons = [season]
+    seasons = _parse_season_args(season, season_range)
 
     engine = get_engine(database_url)
     create_tables(engine)
@@ -761,6 +795,150 @@ def merge_duplicates(
         count = merge_players_db(engine, merge_pairs)
         console.print(f"\n[bold green]{count} merges completed[/bold green]")
         console.print("[dim]Re-run build + compute-epa for affected seasons to regenerate stats[/dim]")
+
+
+@app.command("cache-info")
+def cache_info(
+    league: League = typer.Option(League.ISFL, help="League"),
+    season: int = typer.Option(None, help="Show detail for a single season"),
+):
+    """Show what data is cached, file sizes, and fetch timestamps."""
+    from rich.table import Table
+
+    from isfl_epa.scraper.cache import get_season_cache_summary, list_cached_seasons
+
+    if season is not None:
+        # Per-file detail for one season
+        info = get_season_cache_summary(league, season)
+        if not info["files"]:
+            console.print(f"[yellow]No cached data for {league.value} S{season}[/yellow]")
+            return
+
+        table = Table(title=f"{league.value} S{season} Cache ({info['file_count']} files)")
+        table.add_column("File")
+        table.add_column("Size", justify="right")
+        table.add_column("Fetched At")
+
+        for f in info["files"]:
+            size_str = _format_size(f["size_bytes"])
+            fetched = _format_timestamp(f["fetched_at"])
+            table.add_row(f["name"], size_str, fetched)
+
+        console.print(table)
+        console.print(f"Total size: {_format_size(info['total_size_bytes'])}")
+    else:
+        # Summary across all seasons
+        seasons = list_cached_seasons(league)
+        if not seasons:
+            console.print(f"[yellow]No cached data for {league.value}[/yellow]")
+            return
+
+        table = Table(title=f"{league.value} Cache Summary")
+        table.add_column("Season", justify="right")
+        table.add_column("Files", justify="right")
+        table.add_column("Size", justify="right")
+        table.add_column("Oldest Fetch")
+        table.add_column("Newest Fetch")
+
+        total_size = 0
+        total_files = 0
+        for s in seasons:
+            info = get_season_cache_summary(league, s)
+            total_size += info["total_size_bytes"]
+            total_files += info["file_count"]
+
+            timestamps = [f["fetched_at"] for f in info["files"] if f.get("fetched_at")]
+            oldest = _format_timestamp(min(timestamps)) if timestamps else "-"
+            newest = _format_timestamp(max(timestamps)) if timestamps else "-"
+
+            table.add_row(
+                f"S{s}",
+                str(info["file_count"]),
+                _format_size(info["total_size_bytes"]),
+                oldest,
+                newest,
+            )
+
+        console.print(table)
+        console.print(
+            f"\n[bold]{len(seasons)} seasons, {total_files} files, "
+            f"{_format_size(total_size)} total[/bold]"
+        )
+
+
+@app.command("cache-clear")
+def cache_clear(
+    league: League = typer.Option(League.ISFL, help="League"),
+    season: int = typer.Option(None, help="Season to clear (omit for all)"),
+    data_type: str = typer.Option(None, help="Data type to clear: pbp, boxscore, roster, pbp_html, etc."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Delete cached data files, optionally filtered by season and data type."""
+    from isfl_epa.scraper.cache import clear_season_cache, get_season_cache_summary, list_cached_seasons
+
+    if season is not None:
+        seasons = [season]
+    else:
+        seasons = list_cached_seasons(league)
+
+    if not seasons:
+        console.print(f"[yellow]No cached data for {league.value}[/yellow]")
+        return
+
+    # Show what will be deleted
+    total_files = 0
+    total_size = 0
+    for s in seasons:
+        info = get_season_cache_summary(league, s)
+        if data_type:
+            matching = [f for f in info["files"] if f["name"].startswith(data_type)]
+            total_files += len(matching)
+            total_size += sum(f["size_bytes"] for f in matching)
+        else:
+            total_files += info["file_count"]
+            total_size += info["total_size_bytes"]
+
+    if total_files == 0:
+        console.print("[yellow]No matching files to delete[/yellow]")
+        return
+
+    scope = f"S{season}" if season else f"all {len(seasons)} seasons"
+    dtype_str = f" ({data_type})" if data_type else ""
+    console.print(
+        f"Will delete {total_files} files ({_format_size(total_size)}) "
+        f"for {league.value} {scope}{dtype_str}"
+    )
+
+    if not yes:
+        confirm = typer.confirm("Proceed?")
+        if not confirm:
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    deleted = 0
+    for s in seasons:
+        deleted += clear_season_cache(league, s, data_type)
+
+    console.print(f"[green]Deleted {deleted} files[/green]")
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format byte count as human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _format_timestamp(iso_str: str) -> str:
+    """Format an ISO timestamp to a short readable date."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso_str
 
 
 if __name__ == "__main__":

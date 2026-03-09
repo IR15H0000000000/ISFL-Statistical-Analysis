@@ -224,9 +224,11 @@
 </footer>
 
 <script>
-const COLUMNS = [
+const OFFENSIVE_COLUMNS = [
   { key: "rank",        label: "#",           fmt: "int",  align: "center", epa: false },
   { key: "team",        label: "Team",        fmt: "str",  align: "left",   epa: false },
+  { key: "record",      label: "Record",      fmt: "str",  align: "center", epa: false },
+  { key: "points_for",  label: "PF",          fmt: "int",  align: "right",  epa: false },
   { key: "epa_per_play",label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
   { key: "total_epa",   label: "Total EPA",   fmt: "dec2", align: "right",  epa: true, ranked: true },
   { key: "success_pct", label: "Success %",   fmt: "pct1", align: "right",  epa: false },
@@ -241,10 +243,33 @@ const COLUMNS = [
   { key: "int_pct",     label: "Int %",       fmt: "pct1", align: "right",  epa: false },
 ];
 
+const DEFENSIVE_COLUMNS = [
+  { key: "rank",           label: "#",           fmt: "int",  align: "center", epa: false },
+  { key: "team",           label: "Team",        fmt: "str",  align: "left",   epa: false },
+  { key: "record",         label: "Record",      fmt: "str",  align: "center", epa: false },
+  { key: "points_against", label: "PA",          fmt: "int",  align: "right",  epa: false },
+  { key: "epa_per_play",   label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
+  { key: "total_epa",      label: "Total EPA",   fmt: "dec2", align: "right",  epa: true, ranked: true },
+  { key: "success_pct",    label: "Success %",   fmt: "pct1", align: "right",  epa: false },
+  { key: "epa_per_pass",   label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true  },
+  { key: "epa_per_rush",   label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true  },
+  { key: "pass_yards",     label: "Pass Yards",  fmt: "int",  align: "right",  epa: false },
+  { key: "comp_pct",       label: "Comp %",      fmt: "pct1", align: "right",  epa: false },
+  { key: "pass_td",        label: "Pass TD",     fmt: "int",  align: "right",  epa: false },
+  { key: "rush_yards",     label: "Rush Yards",  fmt: "int",  align: "right",  epa: false },
+  { key: "rush_td",        label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
+  { key: "sack_pct",       label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
+  { key: "int_pct",        label: "Int %",       fmt: "pct1", align: "right",  epa: false },
+];
+
 let currentData = [];
 let currentSide = "offensive";
 let sortKey = "epa_per_play";
 let sortAsc = false;
+
+function getColumns() {
+  return currentSide === "defensive" ? DEFENSIVE_COLUMNS : OFFENSIVE_COLUMNS;
+}
 
 function formatVal(val, fmt) {
   if (val == null || val === undefined) return "-";
@@ -285,7 +310,7 @@ function rankedColor(val, minVal, maxVal, mid, invert) {
 function buildHeaders() {
   const row = document.getElementById("header-row");
   row.innerHTML = "";
-  COLUMNS.forEach(col => {
+  getColumns().forEach(col => {
     const th = document.createElement("th");
     th.dataset.key = col.key;
     th.style.textAlign = col.align;
@@ -324,8 +349,9 @@ function renderTable() {
   data.forEach((d, i) => d.rank = i + 1);
 
   // Compute min/max/midpoint for EPA columns
+  const cols = getColumns();
   const epaRanges = {};
-  COLUMNS.filter(c => c.epa).forEach(col => {
+  cols.filter(c => c.epa).forEach(col => {
     const vals = data.map(d => d[col.key]).filter(v => v != null);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
@@ -340,7 +366,7 @@ function renderTable() {
   tbody.innerHTML = "";
   data.forEach(row => {
     const tr = document.createElement("tr");
-    COLUMNS.forEach(col => {
+    cols.forEach(col => {
       const td = document.createElement("td");
       td.style.textAlign = col.align;
       td.textContent = formatVal(row[col.key], col.fmt);

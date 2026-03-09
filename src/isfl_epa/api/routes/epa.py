@@ -235,6 +235,10 @@ def _offensive_dashboard(engine, season: int) -> list[dict]:
                 func.sum(tg.c.rush_td).label("rush_td"),
                 func.sum(tg.c.sacks_taken).label("sacks_taken"),
                 func.sum(tg.c.interceptions_thrown).label("ints_thrown"),
+                func.sum(tg.c.points_for).label("points_for"),
+                func.sum(case((tg.c.points_for > tg.c.points_against, 1), else_=0)).label("wins"),
+                func.sum(case((tg.c.points_for < tg.c.points_against, 1), else_=0)).label("losses"),
+                func.sum(case((tg.c.points_for == tg.c.points_against, 1), else_=0)).label("ties"),
             )
             .where(tg.c.season == season)
             .group_by(tg.c.team)
@@ -254,9 +258,17 @@ def _offensive_dashboard(engine, season: int) -> list[dict]:
             sacks_taken = trad.get("sacks_taken") or 0
             ints_thrown = trad.get("ints_thrown") or 0
             dropbacks = pass_att + sacks_taken
+            wins = trad.get("wins") or 0
+            losses = trad.get("losses") or 0
+            ties = trad.get("ties") or 0
 
             results.append({
                 "team": team,
+                "record": f"{wins}-{losses}" + (f"-{ties}" if ties else ""),
+                "wins": wins,
+                "losses": losses,
+                "ties": ties,
+                "points_for": trad.get("points_for") or 0,
                 "epa_per_play": round(epa.get("epa_per_play", 0), 3),
                 "total_epa": round(epa.get("total_epa", 0), 2),
                 "success_pct": round(success_by_team.get(team, 0) * 100, 1),
@@ -303,11 +315,15 @@ def _defensive_dashboard(engine, season: int) -> list[dict]:
         )
         trad_rows = {row.team: row._mapping for row in conn.execute(def_trad_stmt)}
 
-        # 3. Defensive sacks_made and INTs forced from the team's own perspective
+        # 3. Defensive sacks_made, points_against, record from the team's own perspective
         own_def_stmt = (
             select(
                 tg.c.team,
                 func.sum(tg.c.sacks_made).label("sacks_made"),
+                func.sum(tg.c.points_against).label("points_against"),
+                func.sum(case((tg.c.points_for > tg.c.points_against, 1), else_=0)).label("wins"),
+                func.sum(case((tg.c.points_for < tg.c.points_against, 1), else_=0)).label("losses"),
+                func.sum(case((tg.c.points_for == tg.c.points_against, 1), else_=0)).label("ties"),
             )
             .where(tg.c.season == season)
             .group_by(tg.c.team)
@@ -334,8 +350,17 @@ def _defensive_dashboard(engine, season: int) -> list[dict]:
             rush_epa = epa_data.get("rush_epa", 0)
             sacks_made = own.get("sacks_made") or 0
 
+            wins = own.get("wins") or 0
+            losses = own.get("losses") or 0
+            ties = own.get("ties") or 0
+
             results.append({
                 "team": team,
+                "record": f"{wins}-{losses}" + (f"-{ties}" if ties else ""),
+                "wins": wins,
+                "losses": losses,
+                "ties": ties,
+                "points_against": own.get("points_against") or 0,
                 "epa_per_play": round(total_epa / plays, 3) if plays else 0,
                 "total_epa": round(total_epa, 2),
                 "success_pct": round(success_by_team.get(team, 0) * 100, 1),

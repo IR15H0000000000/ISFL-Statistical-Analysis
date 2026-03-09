@@ -142,13 +142,22 @@ The API runs at `http://localhost:8000` with auto-generated docs at `/docs`.
 
 ```bash
 # Download and cache PBP + boxscore data for a season
-uv run isfl-epa scrape --league ISFL --season 50
+uv run isfl-epa scrape --season 50
+
+# Scrape a range of seasons (with progress bar)
+uv run isfl-epa scrape --season-range '50-59'
+
+# Only re-download the last 2 data files (where new games appear, S27+ only)
+uv run isfl-epa scrape --season 59 --refresh-last 2
+
+# Force re-download everything
+uv run isfl-epa scrape --season 50 --force-refresh
 
 # Dump raw play-by-play JSON for a specific game
-uv run isfl-epa explore --league ISFL --season 50 --game-id 9630
+uv run isfl-epa explore --season 50 --game-id 9630
 
 # Parse a season and load into PostgreSQL + Parquet
-uv run isfl-epa build --league ISFL --season 50
+uv run isfl-epa build --season 50
 
 # View season stats
 uv run isfl-epa stats --season 50 --stat passing --top 10
@@ -165,9 +174,6 @@ uv run isfl-epa summary --season 50
 # Train era-specific EP models (drive-outcome regression)
 uv run isfl-epa train-ep --era both
 
-# Train with a specific model type (hgb_reg, hgb, or logistic)
-uv run isfl-epa train-ep --era both --model-type hgb_reg
-
 # Compute EPA for a season
 uv run isfl-epa compute-epa --season 50
 
@@ -178,6 +184,14 @@ uv run isfl-epa epa-stats --season 50 --stat team
 # Look up a player
 uv run isfl-epa player --name "Patterson, J."
 uv run isfl-epa player --id 42
+
+# View cache info (what's cached, sizes, fetch timestamps)
+uv run isfl-epa cache-info
+uv run isfl-epa cache-info --season 59
+
+# Selectively clear cached data
+uv run isfl-epa cache-clear --season 59 --data-type pbp
+uv run isfl-epa cache-clear --season 59  # clear all data types for S59
 ```
 
 ### Python API
@@ -241,7 +255,7 @@ src/isfl_epa/
     pbp_html.py      # Fetch + parse S1-26 HTML PBP pages
     boxscore.py      # Fetch + decompress S27+ JSON boxscore data
     boxscore_html.py # Fetch + parse S1-26 HTML boxscore pages
-    cache.py         # Local JSON file cache
+    cache.py         # Local JSON file cache with metadata sidecar
   parser/
     schema.py        # Pydantic models (PlayType, ParsedPlay, Game)
     play_parser.py   # Regex pipeline: structured fields + play descriptions

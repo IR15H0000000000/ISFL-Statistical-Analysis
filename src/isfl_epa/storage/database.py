@@ -413,7 +413,22 @@ def load_season(
         all_receiving.extend(rc.model_dump() for rc in game_player_receiving(game, registry))
         all_defensive.extend(d.model_dump() for d in game_player_defensive(game, registry))
 
+    # Determine season from the games being loaded
+    season = games[0].season if games else None
+
     with engine.begin() as conn:
+        # Clear existing data for this season to avoid duplicates on re-runs
+        if season is not None:
+            for table in (
+                player_game_defensive_table,
+                player_game_receiving_table,
+                player_game_rushing_table,
+                player_game_passing_table,
+                team_games_table,
+                plays_table,
+            ):
+                conn.execute(table.delete().where(table.c.season == season))
+
         if all_plays:
             conn.execute(insert(plays_table), all_plays)
         if all_team_stats:

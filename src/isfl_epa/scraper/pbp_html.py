@@ -12,8 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
 
 from isfl_epa.config import League, SCRAPER_MAX_WORKERS, get_game_results_url, get_pbp_html_url
+from isfl_epa.logging_config import get_logger
 from isfl_epa.scraper.cache import get_cached, save_to_cache
 from isfl_epa.scraper.http import get_session
+
+logger = get_logger("scraper.pbp_html")
 
 _QUARTER_MAP = {
     "First Quarter": "Q1",
@@ -65,6 +68,7 @@ def _parse_html(html: str, game_id: int) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", class_="Grid")
     if not table:
+        logger.warning("No PBP table found in HTML for game %d", game_id)
         return {"id": game_id, "Q1": [], "Q2": [], "Q3": [], "Q4": [], "OT": []}
 
     quarters: dict[str, list[dict]] = {
@@ -144,9 +148,11 @@ def fetch_game_html(
     if not force_refresh:
         cached = get_cached(league, season, "pbp_html", game_id)
         if cached is not None:
+            logger.debug("Cache hit: %s S%d pbp_html game %d", league.value, season, game_id)
             return cached
 
     url = get_pbp_html_url(league, season, game_id)
+    logger.debug("Fetching %s S%d pbp_html game %d", league.value, season, game_id)
     resp = get_session().get(url, timeout=30)
     resp.raise_for_status()
 
