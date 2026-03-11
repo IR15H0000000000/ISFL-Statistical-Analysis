@@ -1,7 +1,7 @@
 """EPA query endpoints."""
 
 from fastapi import APIRouter, Query, Request
-from sqlalchemy import case, cast, desc, func, literal_column, select, Float
+from sqlalchemy import Integer, case, cast, desc, func, literal_column, or_, select, Float
 
 from isfl_epa.storage.database import (
     games_table,
@@ -1257,5 +1257,178 @@ def _compute_defensive_epa(conn, season: int, game_type: str = "regular") -> dic
             result[def_team]["pass_epa"] += row.epa
         elif row.play_type == "rush":
             result[def_team]["rush_epa"] += row.epa
+
+    return result
+
+
+@router.get("/plays")
+def list_plays_epa(
+    request: Request,
+    season: int = Query(default=None),
+    season_min: int = Query(default=None),
+    season_max: int = Query(default=None),
+    play_type: str = Query(default=None),
+    position: str = Query(default=None),
+    side: str = Query(default="offensive"),
+    game_type: str = Query(default="regular"),
+    team: str = Query(default=None),
+    sort_by: str = Query(default="season"),
+    sort_dir: str = Query(default="desc"),
+    limit: int = Query(default=50, le=500),
+    offset: int = Query(default=0),
+):
+    """Browse individual plays with EPA, filtered by position and side."""
+    engine = request.app.state.engine
+    p = plays_table
+    pe = play_epa_table
+    pp = player_positions_table.alias("pp_pos")
+
+    if side == "defensive":
+        primary_id_expr = func.coalesce(
+            p.c.player_id_tackler, p.c.player_id_sacker, p.c.player_id_interceptor
+        )
+        side_filter = or_(
+            p.c.player_id_tackler.isnot(None),
+            p.c.player_id_sacker.isnot(None),
+            p.c.player_id_interceptor.isnot(None),
+        )
+    else:
+        primary_id_expr = func.coalesce(
+            p.c.player_id_passer, p.c.player_id_rusher,
+            p.c.player_id_receiver, p.c.player_id_kicker,
+        )
+        side_filter = or_(
+            p.c.player_id_passer.isnot(None),
+            p.c.player_id_rusher.isnot(None),
+            p.c.player_id_receiver.isnot(None),
+            p.c.player_id_kicker.isnot(None),
+        )
+
+    week_expr = (
+        cast(
+            func.floor(
+                (p.c.game_id - func.min(p.c.game_id).over(partition_by=p.c.season)) / 7.0
+            ),
+            Integer,
+        ) + 1
+    ).label("week")
+
+    stmt = (
+        select(
+            p.c.id, p.c.season, p.c.game_id, week_expr, p.c.quarter, p.c.clock,
+            p.c.down, p.c.distance, p.c.yard_line, p.c.yard_line_team,
+            p.c.play_type, p.c.passer, p.c.rusher, p.c.receiver,
+            p.c.tackler, p.c.sacker, p.c.interceptor,
+            p.c.yards_gained, p.c.first_down, p.c.touchdown,
+            p.c.interception, p.c.fumble, p.c.safety,
+            p.c.description, p.c.home_team, p.c.away_team, p.c.possession_team_id,
+            pe.c.ep_before, pe.c.ep_after, pe.c.epa,
+        )
+        .select_from(p)
+        .join(pe, pe.c.play_id == p.c.id, isouter=True)
+        .where(side_filter)
+        .where(p.c.game_type == game_type)
+    )
+
+    if season is not None:
+        stmt = stmt.where(p.c.season == season)
+        eff_min = eff_max = season
+    else:
+        eff_min = season_min or 1
+        eff_max = season_max or 999
+        stmt = stmt.where(p.c.season.between(eff_min, eff_max))
+
+    if play_type:
+        stmt = stmt.where(p.c.play_type == play_type)
+
+    if team:
+        stmt = stmt.where(or_(p.c.home_team == team, p.c.away_team == team))
+
+    if position:
+        stmt = stmt.join(
+            pp,
+            (pp.c.player_id == primary_id_expr) & (pp.c.season == p.c.season),
+        ).where(pp.c.position == position)
+
+    # Sorting
+    sort_col = {
+        "epa": pe.c.epa,
+        "yards": p.c.yards_gained,
+    }.get(sort_by)
+    if sort_col is not None:
+        stmt = stmt.order_by(
+            desc(sort_col).nulls_last() if sort_dir != "asc" else sort_col.nulls_last()
+        )
+    else:
+        stmt = stmt.order_by(desc(p.c.season), p.c.game_id, p.c.play_index)
+
+    stmt = stmt.limit(limit).offset(offset)
+
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).fetchall()
+
+        # Build possession_team_id → abbr mapping for this season range
+        team_map: dict[int, str] = {}
+        if rows:
+            map_stmt = (
+                select(p.c.home_team, p.c.away_team, p.c.possession_team_id)
+                .where(p.c.season.between(eff_min, eff_max))
+                .where(p.c.possession_team_id.isnot(None))
+                .where(p.c.home_team.isnot(None))
+                .distinct()
+            )
+            candidates: dict[int, set] = {}
+            for r in conn.execute(map_stmt):
+                ptid = int(r.possession_team_id)
+                teams = {r.home_team, r.away_team}
+                if ptid not in candidates:
+                    candidates[ptid] = teams.copy()
+                else:
+                    candidates[ptid] &= teams
+            team_map = {ptid: next(iter(s)) for ptid, s in candidates.items() if len(s) == 1}
+
+    result = []
+    for row in rows:
+        off_abbr = team_map.get(row.possession_team_id) if row.possession_team_id else None
+        if off_abbr and row.home_team and row.away_team:
+            off_team = off_abbr
+            def_team = row.away_team if off_abbr == row.home_team else row.home_team
+        else:
+            off_team = off_abbr
+            def_team = None
+
+        result.append({
+            "id": row.id,
+            "season": row.season,
+            "game_id": row.game_id,
+            "week": row.week,
+            "quarter": row.quarter,
+            "clock": row.clock,
+            "down": row.down,
+            "distance": row.distance,
+            "yard_line": row.yard_line,
+            "yard_line_team": row.yard_line_team,
+            "play_type": row.play_type,
+            "off_team": off_team,
+            "def_team": def_team,
+            "passer": row.passer,
+            "rusher": row.rusher,
+            "receiver": row.receiver,
+            "off_player": row.passer or row.rusher or row.receiver,
+            "tackler": row.tackler,
+            "sacker": row.sacker,
+            "interceptor": row.interceptor,
+            "def_player": row.interceptor or row.sacker or row.tackler,
+            "yards_gained": row.yards_gained,
+            "first_down": row.first_down,
+            "touchdown": row.touchdown,
+            "interception": row.interception,
+            "fumble": row.fumble,
+            "safety": row.safety,
+            "ep_before": row.ep_before,
+            "ep_after": row.ep_after,
+            "epa": row.epa,
+            "description": row.description,
+        })
 
     return result

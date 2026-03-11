@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISFL Play Browser</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a2e;
+  }
+
+  header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 2rem 2rem 1.5rem;
+    text-align: center;
+  }
+
+  header .label {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    color: #56d6d6;
+    margin-bottom: 0.5rem;
+  }
+
+  header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .header-nav {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+  }
+
+  .header-nav a {
+    color: #8888aa;
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    transition: color 0.2s;
+  }
+  .header-nav a:hover { color: #ccc; }
+  .header-nav a.active { color: #56d6d6; }
+
+  nav {
+    display: flex;
+    justify-content: center;
+    gap: 0;
+    margin-top: 1.5rem;
+  }
+
+  nav button {
+    padding: 0.6rem 1.5rem;
+    border: 1px solid #3a3a5e;
+    background: transparent;
+    color: #8888aa;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  nav button:first-child { border-radius: 4px 0 0 4px; }
+  nav button:last-child { border-radius: 0 4px 4px 0; }
+
+  nav button.active {
+    background: #56d6d6;
+    color: #1a1a2e;
+    border-color: #56d6d6;
+  }
+
+  nav button:hover:not(.active) {
+    background: #2a2a4e;
+    color: #ccc;
+  }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    max-width: 1600px;
+    margin: 1.5rem auto 0.75rem;
+    padding: 0 1rem;
+  }
+
+  .controls select, .controls input {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    background: #fff;
+  }
+
+  .controls label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #666;
+    margin-right: 0.25rem;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 0;
+  }
+
+  .mode-toggle button {
+    padding: 0.45rem 1rem;
+    border: 1px solid #ccc;
+    background: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: #666;
+  }
+  .mode-toggle button:first-child { border-radius: 4px 0 0 4px; }
+  .mode-toggle button:last-child { border-radius: 0 4px 4px 0; }
+  .mode-toggle button.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
+
+  .table-wrap {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 0 1rem 1rem;
+    overflow-x: auto;
+  }
+
+  .count-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0 0.5rem;
+    font-size: 0.8rem;
+    color: #888;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    font-size: 0.8rem;
+  }
+
+  thead th {
+    background: #1a1a2e;
+    color: #aab;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.5px;
+    padding: 0.65rem 0.5rem;
+    text-align: right;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  thead th:first-child,
+  thead th.left { text-align: left; }
+
+  thead th:hover { color: #56d6d6; }
+
+  thead th .arrow {
+    font-size: 0.6rem;
+    margin-left: 3px;
+    opacity: 0.4;
+  }
+  thead th.sort-active .arrow { opacity: 1; color: #56d6d6; }
+
+  tbody td {
+    padding: 0.5rem 0.5rem;
+    text-align: right;
+    border-bottom: 1px solid #f0f0f0;
+    white-space: nowrap;
+  }
+  tbody td.left { text-align: left; }
+  tbody td.desc-cell {
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 260px;
+    font-size: 0.75rem;
+    color: #555;
+  }
+
+  tbody tr:hover { background: #f8f9ff; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .loading {
+    text-align: center;
+    padding: 3rem;
+    color: #888;
+    font-size: 1rem;
+  }
+
+  .epa-cell {
+    font-weight: 600;
+    border-radius: 3px;
+    padding: 0.3rem 0.4rem;
+  }
+
+  .flag {
+    display: inline-block;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    margin-right: 2px;
+  }
+  .flag-td  { background: #d4edda; color: #155724; }
+  .flag-int { background: #f8d7da; color: #721c24; }
+  .flag-fum { background: #fff3cd; color: #856404; }
+  .flag-fd  { background: #d1ecf1; color: #0c5460; }
+  .flag-saf { background: #f8d7da; color: #721c24; }
+
+  .load-more-wrap {
+    text-align: center;
+    padding: 1.5rem 0 3rem;
+  }
+
+  #load-more-btn {
+    padding: 0.6rem 2rem;
+    background: #1a1a2e;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #load-more-btn:hover { background: #2a2a4e; }
+  #load-more-btn:disabled { background: #ccc; cursor: default; }
+
+  footer {
+    background: #1a1a2e;
+    color: #666;
+    text-align: center;
+    padding: 2rem;
+    font-size: 0.8rem;
+  }
+  footer a { color: #56d6d6; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="label">Plays</div>
+  <h1>Play Browser</h1>
+  <div class="header-nav">
+    <a href="/static/teams.html">Teams</a>
+    <a href="/static/leaderboard.html">Players</a>
+    <a href="/static/plays.html" class="active">Plays</a>
+  </div>
+  <nav>
+    <button id="btn-offensive" class="active" onclick="switchSide('offensive')">Offensive</button>
+    <button id="btn-defensive" onclick="switchSide('defensive')">Defensive</button>
+  </nav>
+</header>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Season From:</label>
+    <select id="season-min" onchange="resetAndLoad()"></select>
+  </div>
+  <div class="control-group">
+    <label>Season To:</label>
+    <select id="season-max" onchange="resetAndLoad()"></select>
+  </div>
+  <div class="control-group">
+    <label>Play Type:</label>
+    <select id="play-type" onchange="resetAndLoad()">
+      <option value="">All</option>
+      <option value="pass">Pass</option>
+      <option value="rush">Rush</option>
+      <option value="sack">Sack</option>
+      <option value="field_goal">Field Goal</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label>Position:</label>
+    <select id="pos-select" onchange="resetAndLoad()">
+      <option value="">All</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label>Team:</label>
+    <select id="team-select" onchange="resetAndLoad()">
+      <option value="">All</option>
+    </select>
+  </div>
+  <div class="mode-toggle">
+    <button id="gt-regular" class="active" onclick="switchGameType('regular')" style="font-size:0.75rem;padding:0.4rem 0.8rem">Regular</button>
+    <button id="gt-playoff" onclick="switchGameType('playoff')" style="font-size:0.75rem;padding:0.4rem 0.8rem">Playoffs</button>
+  </div>
+</div>
+
+<div class="table-wrap">
+  <div class="loading" id="loading">Loading...</div>
+  <div class="count-bar" id="count-bar" style="display:none">
+    <span id="count-label"></span>
+  </div>
+  <table id="plays-table" style="display:none">
+    <thead>
+      <tr id="header-row"></tr>
+    </thead>
+    <tbody id="table-body"></tbody>
+  </table>
+</div>
+
+<div class="load-more-wrap" id="load-more-wrap" style="display:none">
+  <button id="load-more-btn" onclick="loadMore()">Load More</button>
+</div>
+
+<footer>
+  <p>ISFL EPA &mdash; <a href="/static/teams.html">Teams</a> | <a href="/static/leaderboard.html">Players</a> | <a href="/docs">API Docs</a></p>
+</footer>
+
+<script>
+const LIMIT = 50;
+
+let currentSide = "offensive";
+let currentGameType = "regular";
+let playoffSeasons = new Set();
+let allSeasons = [];
+let currentOffset = 0;
+let isLoading = false;
+let hasMore = true;
+let currentController = null;
+
+// Sort state
+let sortBy = "season";
+let sortAsc = false;
+
+const COLUMNS = [
+  { key: "row",         label: "#",          align: "left",  sortable: false },
+  { key: "season",      label: "Season",     align: "right", sortable: true  },
+  { key: "week",        label: "Wk",         align: "right", sortable: false },
+  { key: "qtr_clock",  label: "Qtr/Clock",  align: "right", sortable: false },
+  { key: "dn_dist",    label: "Dn/Dist",    align: "right", sortable: false },
+  { key: "yard_line",  label: "Yd Ln",      align: "right", sortable: false },
+  { key: "off_team",   label: "Off",        align: "left",  sortable: false },
+  { key: "play_type",  label: "Type",       align: "left",  sortable: false },
+  { key: "off_player", label: "Off Player", align: "left",  sortable: false },
+  { key: "yards_gained",label: "Yds",       align: "right", sortable: true  },
+  { key: "def_team",   label: "Def",        align: "left",  sortable: false },
+  { key: "def_player", label: "Def Player", align: "left",  sortable: false },
+  { key: "flags",      label: "Flags",      align: "left",  sortable: false },
+  { key: "epa",        label: "EPA",        align: "right", sortable: true  },
+  { key: "description",label: "Description",align: "left",  sortable: false },
+];
+
+function buildHeaders() {
+  const row = document.getElementById("header-row");
+  row.innerHTML = "";
+  COLUMNS.forEach(col => {
+    const th = document.createElement("th");
+    if (col.align === "left") th.classList.add("left");
+    const isActive = col.sortable && col.key === sortBy;
+    if (isActive) th.classList.add("sort-active");
+    const arrow = col.sortable ? `<span class="arrow">${isActive ? (sortAsc ? "▲" : "▼") : "▼"}</span>` : "";
+    th.innerHTML = col.label + arrow;
+    if (col.sortable) {
+      th.style.cursor = "pointer";
+      th.onclick = () => {
+        if (sortBy === col.key) {
+          sortAsc = !sortAsc;
+        } else {
+          sortBy = col.key;
+          sortAsc = col.key !== "epa" && col.key !== "yards_gained";
+        }
+        resetAndLoad();
+      };
+    }
+    row.appendChild(th);
+  });
+}
+
+function epaColor(val) {
+  if (val == null) return "";
+  const intensity = Math.min(Math.abs(val) / 4, 1);
+  const l = 95 - intensity * 35;
+  const s = 40 + intensity * 30;
+  return val > 0 ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+function renderFlags(play) {
+  let html = "";
+  if (play.touchdown) html += '<span class="flag flag-td">TD</span>';
+  if (play.interception) html += '<span class="flag flag-int">INT</span>';
+  if (play.fumble) html += '<span class="flag flag-fum">FUM</span>';
+  if (play.safety) html += '<span class="flag flag-saf">SAF</span>';
+  if (play.first_down && !play.touchdown) html += '<span class="flag flag-fd">FD</span>';
+  return html;
+}
+
+function yardLine(play) {
+  if (play.yard_line == null) return "—";
+  const yl = play.yard_line;
+  const team = play.yard_line_team;
+  if (!team) return String(yl);
+  // If possession team is at their own side vs opponent side
+  return yl <= 50 ? `OWN ${yl}` : `OPP ${100 - yl}`;
+}
+
+function dnDist(play) {
+  if (play.down == null) return "—";
+  const ordinal = ["", "1st", "2nd", "3rd", "4th"];
+  const d = ordinal[play.down] || `${play.down}th`;
+  const dist = play.distance ?? "?";
+  return `${d} & ${dist}`;
+}
+
+let rowCounter = 0;
+
+function appendRows(plays) {
+  const tbody = document.getElementById("table-body");
+  plays.forEach(play => {
+    rowCounter++;
+    const tr = document.createElement("tr");
+    COLUMNS.forEach(col => {
+      const td = document.createElement("td");
+      if (col.align === "left") td.classList.add("left");
+
+      switch (col.key) {
+        case "row":
+          td.textContent = rowCounter;
+          break;
+        case "season":
+          td.textContent = play.season != null ? `S${play.season}` : "—";
+          break;
+        case "week":
+          td.textContent = play.week != null ? `W${play.week}` : "—";
+          break;
+        case "qtr_clock":
+          td.textContent = play.quarter != null ? `Q${play.quarter} ${play.clock || ""}`.trim() : "—";
+          break;
+        case "dn_dist":
+          td.textContent = dnDist(play);
+          break;
+        case "yard_line":
+          td.textContent = yardLine(play);
+          break;
+        case "off_team":
+          td.textContent = play.off_team || "—";
+          break;
+        case "play_type":
+          td.textContent = play.play_type || "—";
+          break;
+        case "off_player":
+          td.textContent = play.off_player || "—";
+          break;
+        case "yards_gained":
+          td.textContent = play.yards_gained != null ? play.yards_gained : "—";
+          break;
+        case "def_team":
+          td.textContent = play.def_team || "—";
+          break;
+        case "def_player":
+          td.textContent = play.def_player || "—";
+          break;
+        case "flags":
+          td.innerHTML = renderFlags(play) || "—";
+          break;
+        case "epa":
+          td.classList.add("epa-cell");
+          if (play.epa != null) {
+            td.textContent = play.epa.toFixed(2);
+            td.style.backgroundColor = epaColor(play.epa);
+          } else {
+            td.textContent = "—";
+          }
+          break;
+        case "description":
+          td.classList.add("desc-cell");
+          td.title = play.description || "";
+          td.textContent = play.description ? play.description.slice(0, 80) : "—";
+          break;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function getParams(offset) {
+  const params = new URLSearchParams();
+  const sMin = document.getElementById("season-min").value;
+  const sMax = document.getElementById("season-max").value;
+  if (sMin) params.set("season_min", sMin);
+  if (sMax) params.set("season_max", sMax);
+  const pt = document.getElementById("play-type").value;
+  if (pt) params.set("play_type", pt);
+  const pos = document.getElementById("pos-select").value;
+  if (pos) params.set("position", pos);
+  const team = document.getElementById("team-select").value;
+  if (team) params.set("team", team);
+  params.set("side", currentSide);
+  params.set("game_type", currentGameType);
+  params.set("sort_by", sortBy);
+  params.set("sort_dir", sortAsc ? "asc" : "desc");
+  params.set("limit", LIMIT);
+  params.set("offset", offset);
+  return params;
+}
+
+async function loadPlays(append = false) {
+  if (isLoading) return;
+  isLoading = true;
+
+  if (currentController) currentController.abort();
+  currentController = new AbortController();
+
+  if (!append) {
+    document.getElementById("loading").textContent = "Loading...";
+    document.getElementById("loading").style.display = "";
+    document.getElementById("plays-table").style.display = "none";
+    document.getElementById("count-bar").style.display = "none";
+    document.getElementById("load-more-wrap").style.display = "none";
+    document.getElementById("table-body").innerHTML = "";
+    rowCounter = 0;
+    buildHeaders();
+  } else {
+    document.getElementById("load-more-btn").disabled = true;
+    document.getElementById("load-more-btn").textContent = "Loading...";
+  }
+
+  try {
+    const params = getParams(currentOffset);
+    const resp = await fetch(`/epa/plays?${params}`, { signal: currentController.signal });
+    if (!resp.ok) throw new Error(`Server error (${resp.status})`);
+    const plays = await resp.json();
+
+    if (!append) {
+      document.getElementById("loading").style.display = "none";
+      document.getElementById("plays-table").style.display = "";
+      document.getElementById("count-bar").style.display = "";
+    }
+
+    appendRows(plays);
+    currentOffset += plays.length;
+    hasMore = plays.length === LIMIT;
+
+    document.getElementById("count-label").textContent = `Showing ${rowCounter} plays`;
+
+    document.getElementById("load-more-wrap").style.display = hasMore ? "" : "none";
+    if (hasMore) {
+      document.getElementById("load-more-btn").disabled = false;
+      document.getElementById("load-more-btn").textContent = "Load More";
+    }
+
+    if (!append && plays.length === 0) {
+      document.getElementById("plays-table").style.display = "none";
+      document.getElementById("loading").textContent = "No plays found for this selection.";
+      document.getElementById("loading").style.display = "";
+    }
+  } catch (e) {
+    if (e.name === "AbortError") { isLoading = false; return; }
+    document.getElementById("loading").textContent = "Error: " + e.message;
+    document.getElementById("loading").style.display = "";
+  }
+
+  isLoading = false;
+}
+
+function resetAndLoad() {
+  currentOffset = 0;
+  hasMore = true;
+  loadPlays(false);
+}
+
+function loadMore() {
+  loadPlays(true);
+}
+
+function switchSide(side) {
+  currentSide = side;
+  document.getElementById("btn-offensive").classList.toggle("active", side === "offensive");
+  document.getElementById("btn-defensive").classList.toggle("active", side === "defensive");
+  // Reset position since positions available differ by side context
+  document.getElementById("pos-select").value = "";
+  resetAndLoad();
+}
+
+function switchGameType(gt) {
+  currentGameType = gt;
+  document.getElementById("gt-regular").classList.toggle("active", gt === "regular");
+  document.getElementById("gt-playoff").classList.toggle("active", gt === "playoff");
+  resetAndLoad();
+}
+
+function updatePlayoffButton(season) {
+  const hasPlayoffs = playoffSeasons.has(+season);
+  document.getElementById("gt-playoff").style.display = hasPlayoffs ? "" : "none";
+  if (!hasPlayoffs && currentGameType === "playoff") {
+    currentGameType = "regular";
+    document.getElementById("gt-regular").classList.add("active");
+    document.getElementById("gt-playoff").classList.remove("active");
+  }
+}
+
+async function init() {
+  try {
+    const [seasonsResp, playoffResp, posResp, teamsResp] = await Promise.all([
+      fetch("/epa/seasons"),
+      fetch("/epa/seasons?game_type=playoff"),
+      fetch("/epa/positions"),
+      fetch("/epa/teams"),
+    ]);
+
+    allSeasons = await seasonsResp.json();
+    playoffSeasons = new Set(await playoffResp.json());
+    const positions = await posResp.json();
+    const teams = await teamsResp.json();
+
+    const selMin = document.getElementById("season-min");
+    const selMax = document.getElementById("season-max");
+
+    // Seasons in ascending order for the range selectors
+    const ascending = [...allSeasons].reverse();
+    ascending.forEach(s => {
+      const o1 = document.createElement("option");
+      o1.value = s; o1.textContent = `S${s}`;
+      selMin.appendChild(o1);
+      const o2 = document.createElement("option");
+      o2.value = s; o2.textContent = `S${s}`;
+      selMax.appendChild(o2);
+    });
+
+    if (ascending.length > 0) {
+      selMin.value = ascending[ascending.length - 1]; // default: latest season only
+      selMax.value = ascending[ascending.length - 1];
+      updatePlayoffButton(+selMax.value);
+    }
+
+    // Position dropdown
+    const posSel = document.getElementById("pos-select");
+    positions.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p; opt.textContent = p;
+      posSel.appendChild(opt);
+    });
+
+    // Team dropdown
+    const teamSel = document.getElementById("team-select");
+    teams.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t; opt.textContent = t;
+      teamSel.appendChild(opt);
+    });
+
+    // Update playoff button when season range changes
+    document.getElementById("season-max").addEventListener("change", function() {
+      updatePlayoffButton(+this.value);
+    });
+
+    buildHeaders();
+    loadPlays(false);
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error connecting to API: " + e.message;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
