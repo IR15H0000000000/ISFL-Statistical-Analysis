@@ -1285,12 +1285,14 @@ def list_plays_epa(
 
     if side == "defensive":
         primary_id_expr = func.coalesce(
-            p.c.player_id_tackler, p.c.player_id_sacker, p.c.player_id_interceptor
+            p.c.player_id_tackler, p.c.player_id_sacker,
+            p.c.player_id_interceptor, p.c.player_id_fumble_recoverer,
         )
         side_filter = or_(
             p.c.player_id_tackler.isnot(None),
             p.c.player_id_sacker.isnot(None),
             p.c.player_id_interceptor.isnot(None),
+            p.c.player_id_fumble_recoverer.isnot(None),
         )
     else:
         primary_id_expr = func.coalesce(
@@ -1318,7 +1320,7 @@ def list_plays_epa(
             p.c.id, p.c.season, p.c.game_id, week_expr, p.c.quarter, p.c.clock,
             p.c.down, p.c.distance, p.c.yard_line, p.c.yard_line_team,
             p.c.play_type, p.c.passer, p.c.rusher, p.c.receiver,
-            p.c.tackler, p.c.sacker, p.c.interceptor,
+            p.c.tackler, p.c.sacker, p.c.interceptor, p.c.fumble_recoverer,
             p.c.yards_gained, p.c.first_down, p.c.touchdown,
             p.c.interception, p.c.fumble, p.c.safety,
             p.c.description, p.c.home_team, p.c.away_team, p.c.possession_team_id,
@@ -1367,29 +1369,30 @@ def list_plays_epa(
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
 
-        # Build possession_team_id → abbr mapping for this season range
-        team_map: dict[int, str] = {}
+        # Build (season, possession_team_id) → abbr mapping.
+        # Team IDs are not stable across seasons, so key by (season, team_id).
+        team_map: dict[tuple[int, int], str] = {}
         if rows:
             map_stmt = (
-                select(p.c.home_team, p.c.away_team, p.c.possession_team_id)
+                select(p.c.season, p.c.home_team, p.c.away_team, p.c.possession_team_id)
                 .where(p.c.season.between(eff_min, eff_max))
                 .where(p.c.possession_team_id.isnot(None))
                 .where(p.c.home_team.isnot(None))
                 .distinct()
             )
-            candidates: dict[int, set] = {}
+            candidates: dict[tuple[int, int], set] = {}
             for r in conn.execute(map_stmt):
-                ptid = int(r.possession_team_id)
+                key = (int(r.season), int(r.possession_team_id))
                 teams = {r.home_team, r.away_team}
-                if ptid not in candidates:
-                    candidates[ptid] = teams.copy()
+                if key not in candidates:
+                    candidates[key] = teams.copy()
                 else:
-                    candidates[ptid] &= teams
-            team_map = {ptid: next(iter(s)) for ptid, s in candidates.items() if len(s) == 1}
+                    candidates[key] &= teams
+            team_map = {k: next(iter(s)) for k, s in candidates.items() if len(s) == 1}
 
     result = []
     for row in rows:
-        off_abbr = team_map.get(row.possession_team_id) if row.possession_team_id else None
+        off_abbr = team_map.get((row.season, row.possession_team_id)) if row.possession_team_id else None
         if off_abbr and row.home_team and row.away_team:
             off_team = off_abbr
             def_team = row.away_team if off_abbr == row.home_team else row.home_team
@@ -1418,7 +1421,8 @@ def list_plays_epa(
             "tackler": row.tackler,
             "sacker": row.sacker,
             "interceptor": row.interceptor,
-            "def_player": row.interceptor or row.sacker or row.tackler,
+            "fumble_recoverer": row.fumble_recoverer,
+            "def_player": row.interceptor or row.fumble_recoverer or row.sacker or row.tackler,
             "yards_gained": row.yards_gained,
             "first_down": row.first_down,
             "touchdown": row.touchdown,

@@ -137,6 +137,7 @@ plays_table = Table(
     Column("player_id_interceptor", Integer, ForeignKey("players.player_id")),
     Column("player_id_kicker", Integer, ForeignKey("players.player_id")),
     Column("player_id_returner", Integer, ForeignKey("players.player_id")),
+    Column("player_id_fumble_recoverer", Integer, ForeignKey("players.player_id")),
     # Kicking
     Column("kick_yards", Integer),
     Column("fg_distance", Integer),
@@ -152,6 +153,7 @@ plays_table = Table(
     Index("ix_plays_receiver", "player_id_receiver"),
     Index("ix_plays_sacker", "player_id_sacker"),
     Index("ix_plays_interceptor", "player_id_interceptor"),
+    Index("ix_plays_fumble_recoverer", "player_id_fumble_recoverer"),
 )
 
 team_games_table = Table(
@@ -337,6 +339,13 @@ def get_engine(database_url: str | None = None) -> Engine:
 
 def create_tables(engine: Engine) -> None:
     metadata.create_all(engine)
+    # Migration: add player_id_fumble_recoverer if not present (idempotent)
+    with engine.connect() as conn:
+        conn.execute(text(
+            "ALTER TABLE plays ADD COLUMN IF NOT EXISTS "
+            "player_id_fumble_recoverer INTEGER REFERENCES players(player_id)"
+        ))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -467,9 +476,11 @@ def load_season(
                 player_game_rushing_table,
                 player_game_passing_table,
                 team_games_table,
-                plays_table,
             ):
                 conn.execute(table.delete().where(table.c.season == season))
+            # Delete play_epa before plays (FK constraint: play_epa.play_id → plays.id)
+            conn.execute(play_epa_table.delete().where(play_epa_table.c.season == season))
+            conn.execute(plays_table.delete().where(plays_table.c.season == season))
             conn.execute(games_table.delete().where(games_table.c.season == season))
 
         if all_games:
@@ -562,6 +573,7 @@ def _build_play_dicts(game: Game, registry: PlayerRegistry) -> list[dict]:
             "player_id_interceptor": _resolve_player_id(registry, play.interceptor, game.season, None),
             "player_id_kicker": _resolve_player_id(registry, play.kicker, game.season, team_abbr),
             "player_id_returner": _resolve_player_id(registry, play.returner, game.season, None),
+            "player_id_fumble_recoverer": _resolve_player_id(registry, play.fumble_recoverer, game.season, None),
             "kick_yards": play.kick_yards,
             "fg_distance": play.fg_distance,
             "fg_good": play.fg_good,
