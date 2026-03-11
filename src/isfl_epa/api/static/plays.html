@@ -424,10 +424,9 @@ function renderFlags(play) {
 function yardLine(play) {
   if (play.yard_line == null) return "—";
   const yl = play.yard_line;
-  const team = play.yard_line_team;
-  if (!team) return String(yl);
-  // If possession team is at their own side vs opponent side
-  return yl <= 50 ? `OWN ${yl}` : `OPP ${100 - yl}`;
+  const ylt = play.yard_line_team;
+  if (!ylt || !play.off_team) return String(yl);
+  return ylt === play.off_team ? `OWN ${yl}` : `OPP ${yl}`;
 }
 
 function dnDist(play) {
