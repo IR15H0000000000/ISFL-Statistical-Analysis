@@ -205,7 +205,7 @@
   <div style="display:flex;align-items:center;gap:1rem">
     <div>
       <label for="season-select">Season: </label>
-      <select id="season-select" onchange="loadData()"></select>
+      <select id="season-select" onchange="updatePlayoffButton(+this.value); loadData()"></select>
     </div>
     <div class="mode-toggle" style="display:inline-flex;gap:0">
       <button id="gt-regular" class="active" onclick="switchGameType('regular')" style="padding:0.4rem 1rem;border:1px solid #ccc;border-radius:4px 0 0 4px;background:#1a1a2e;color:#fff;font-size:0.8rem;cursor:pointer;font-weight:600">Regular Season</button>
@@ -271,8 +271,10 @@ const DEFENSIVE_COLUMNS = [
 let currentData = [];
 let currentSide = "offensive";
 let currentGameType = "regular";
+let playoffSeasons = new Set();
 let sortKey = "epa_per_play";
 let sortAsc = false;
+let currentController = null;
 
 function getColumns() {
   return currentSide === "defensive" ? DEFENSIVE_COLUMNS : OFFENSIVE_COLUMNS;
@@ -342,10 +344,21 @@ function buildHeaders() {
 }
 
 function renderTable() {
+  if (currentData.length === 0) {
+    document.getElementById("stats-table").style.display = "none";
+    document.getElementById("loading").style.display = "";
+    document.getElementById("loading").textContent = "No data available for this selection.";
+    return;
+  }
+
   // Sort data
   const data = [...currentData];
   data.sort((a, b) => {
     let va = a[sortKey], vb = b[sortKey];
+    // Sort record by wins numerically
+    if (sortKey === "record") { va = a.wins ?? 0; vb = b.wins ?? 0; }
+    if (va == null) va = sortAsc ? Infinity : -Infinity;
+    if (vb == null) vb = sortAsc ? Infinity : -Infinity;
     if (typeof va === "string") {
       return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
     }
@@ -419,26 +432,50 @@ function switchGameType(gt) {
   loadData();
 }
 
+function updatePlayoffButton(season) {
+  const hasPlayoffs = playoffSeasons.has(season);
+  const playBtn = document.getElementById("gt-playoff");
+  playBtn.style.display = hasPlayoffs ? "" : "none";
+  if (!hasPlayoffs && currentGameType === "playoff") {
+    currentGameType = "regular";
+    const regBtn = document.getElementById("gt-regular");
+    regBtn.style.background = "#1a1a2e";
+    regBtn.style.color = "#fff";
+    playBtn.style.background = "#fff";
+    playBtn.style.color = "#666";
+  }
+}
+
 async function loadData() {
   const season = document.getElementById("season-select").value;
   if (!season) return;
 
+  if (currentController) currentController.abort();
+  currentController = new AbortController();
+
+  document.getElementById("loading").textContent = "Loading...";
   document.getElementById("loading").style.display = "";
   document.getElementById("stats-table").style.display = "none";
 
   try {
-    const resp = await fetch(`/epa/team-dashboard?season=${season}&side=${currentSide}&game_type=${currentGameType}`);
+    const resp = await fetch(`/epa/team-dashboard?season=${season}&side=${currentSide}&game_type=${currentGameType}`, { signal: currentController.signal });
+    if (!resp.ok) throw new Error(`Server error (${resp.status})`);
     currentData = await resp.json();
     renderTable();
   } catch (e) {
+    if (e.name === "AbortError") return;
     document.getElementById("loading").textContent = "Error loading data: " + e.message;
   }
 }
 
 async function init() {
   try {
-    const resp = await fetch("/epa/seasons");
+    const [resp, playoffResp] = await Promise.all([
+      fetch("/epa/seasons"),
+      fetch("/epa/seasons?game_type=playoff"),
+    ]);
     const seasons = await resp.json();
+    playoffSeasons = new Set(await playoffResp.json());
     const sel = document.getElementById("season-select");
     seasons.forEach(s => {
       const opt = document.createElement("option");
@@ -448,6 +485,7 @@ async function init() {
     });
     if (seasons.length > 0) {
       sel.value = seasons[0];
+      updatePlayoffButton(seasons[0]);
       loadData();
     } else {
       document.getElementById("loading").textContent = "No EPA data available. Run compute-epa first.";

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query, Request
 from sqlalchemy import case, cast, desc, func, literal_column, select, Float
 
 from isfl_epa.storage.database import (
+    games_table,
     get_team_id_to_abbr,
     play_epa_table,
     player_game_defensive_table,
@@ -185,14 +186,22 @@ def available_seasons(
     request: Request,
     game_type: str = Query(default="regular"),
 ):
-    """List seasons that have EPA data, descending."""
+    """List seasons that have EPA data (regular) or games (playoff), descending."""
     engine = request.app.state.engine
-    stmt = (
-        select(team_season_epa_table.c.season)
-        .where(team_season_epa_table.c.game_type == game_type)
-        .distinct()
-        .order_by(desc(team_season_epa_table.c.season))
-    )
+    if game_type == "playoff":
+        stmt = (
+            select(games_table.c.season)
+            .where(games_table.c.game_type == "playoff")
+            .distinct()
+            .order_by(desc(games_table.c.season))
+        )
+    else:
+        stmt = (
+            select(team_season_epa_table.c.season)
+            .where(team_season_epa_table.c.game_type == game_type)
+            .distinct()
+            .order_by(desc(team_season_epa_table.c.season))
+        )
     with engine.connect() as conn:
         return [row[0] for row in conn.execute(stmt)]
 
@@ -228,14 +237,61 @@ def team_dashboard(
     return _offensive_dashboard(engine, season, game_type)
 
 
+def _compute_offensive_epa(conn, season: int, game_type: str = "regular") -> dict[str, dict]:
+    """Compute offensive EPA per team from play-level data.
+
+    Returns {team: {total_epa, pass_epa, rush_epa, plays, epa_per_play}}.
+    """
+    mapping = _resolve_possession_team(conn, season)
+    if not mapping:
+        return {}
+
+    p = plays_table
+    e = play_epa_table
+    scrimmage_types = ["pass", "rush", "sack"]
+
+    stmt = (
+        select(
+            p.c.game_id,
+            p.c.possession_team_id,
+            p.c.play_type,
+            e.c.epa,
+        )
+        .join(e, p.c.id == e.c.play_id)
+        .where(p.c.season == season)
+        .where(p.c.game_type == game_type)
+        .where(p.c.play_type.in_(scrimmage_types))
+        .where(e.c.epa.isnot(None))
+    )
+
+    result = {}
+    for row in conn.execute(stmt):
+        poss_team = mapping.get((row.game_id, row.possession_team_id))
+        if not poss_team:
+            continue
+
+        if poss_team not in result:
+            result[poss_team] = {"total_epa": 0, "pass_epa": 0, "rush_epa": 0, "plays": 0}
+
+        result[poss_team]["total_epa"] += row.epa
+        result[poss_team]["plays"] += 1
+        if row.play_type in ("pass", "sack"):
+            result[poss_team]["pass_epa"] += row.epa
+        elif row.play_type == "rush":
+            result[poss_team]["rush_epa"] += row.epa
+
+    for team_data in result.values():
+        plays = team_data["plays"]
+        team_data["epa_per_play"] = team_data["total_epa"] / plays if plays else 0
+
+    return result
+
+
 def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> list[dict]:
     """Build offensive team dashboard data."""
     with engine.connect() as conn:
-        # 1. EPA data from team_season_epa
-        epa_stmt = select(team_season_epa_table).where(
-            team_season_epa_table.c.season == season
-        ).where(team_season_epa_table.c.game_type == game_type)
-        epa_rows = {row.team: row._mapping for row in conn.execute(epa_stmt)}
+        # 1. EPA data computed from play-level data
+        epa_rows = _compute_offensive_epa(conn, season, game_type)
 
         # 2. Traditional stats from team_games
         tg = team_games_table
@@ -267,8 +323,9 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
 
         # Merge everything
         results = []
-        for team in sorted(epa_rows.keys()):
-            epa = epa_rows[team]
+        all_teams = set(epa_rows.keys()) | set(trad_rows.keys())
+        for team in sorted(all_teams):
+            epa = epa_rows.get(team, {})
             trad = trad_rows.get(team, {})
             pass_att = trad.get("pass_att") or 0
             rush_att = trad.get("rush_att") or 0

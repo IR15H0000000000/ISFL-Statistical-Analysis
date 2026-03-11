@@ -273,7 +273,7 @@
 
   <div class="control-group" id="season-single-ctrl">
     <label for="season-select">Season:</label>
-    <select id="season-select" onchange="loadData()"></select>
+    <select id="season-select" onchange="updatePlayoffButton(+this.value); loadData()"></select>
   </div>
 
   <div class="control-group" id="season-range-ctrl" style="display:none">
@@ -419,6 +419,8 @@ let currentData = [];
 let sortKey = "epa_per_dropback";
 let sortAsc = false;
 let allSeasons = [];
+let playoffSeasons = new Set();
+let currentController = null;
 
 function getColumns() {
   let cols = COLUMN_MAP[currentCategory];
@@ -499,6 +501,13 @@ function buildHeaders() {
 }
 
 function renderTable() {
+  if (currentData.length === 0) {
+    document.getElementById("stats-table").style.display = "none";
+    document.getElementById("loading").style.display = "";
+    document.getElementById("loading").textContent = "No data available for this selection.";
+    return;
+  }
+
   const columns = getColumns();
   const data = [...currentData];
   data.sort((a, b) => {
@@ -600,7 +609,21 @@ function switchGameType(gt) {
   loadData();
 }
 
+function updatePlayoffButton(season) {
+  const hasPlayoffs = playoffSeasons.has(season);
+  document.getElementById("gt-playoff").style.display = hasPlayoffs ? "" : "none";
+  if (!hasPlayoffs && currentGameType === "playoff") {
+    currentGameType = "regular";
+    document.getElementById("gt-regular").classList.add("active");
+    document.getElementById("gt-playoff").classList.remove("active");
+  }
+}
+
 async function loadData() {
+  if (currentController) currentController.abort();
+  currentController = new AbortController();
+
+  document.getElementById("loading").textContent = "Loading...";
   document.getElementById("loading").style.display = "";
   document.getElementById("stats-table").style.display = "none";
 
@@ -629,19 +652,25 @@ async function loadData() {
   if (minPlays) params.set("min_plays", minPlays);
 
   try {
-    const resp = await fetch(`/epa/leaderboard?${params}`);
+    const resp = await fetch(`/epa/leaderboard?${params}`, { signal: currentController.signal });
+    if (!resp.ok) throw new Error(`Server error (${resp.status})`);
     currentData = await resp.json();
     renderTable();
   } catch (e) {
+    if (e.name === "AbortError") return;
     document.getElementById("loading").textContent = "Error loading data: " + e.message;
   }
 }
 
 async function init() {
   try {
-    // Fetch seasons
-    const seasonsResp = await fetch("/epa/seasons");
+    // Fetch seasons and playoff-available seasons in parallel
+    const [seasonsResp, playoffSeasonsResp] = await Promise.all([
+      fetch("/epa/seasons"),
+      fetch("/epa/seasons?game_type=playoff"),
+    ]);
     allSeasons = await seasonsResp.json();
+    playoffSeasons = new Set(await playoffSeasonsResp.json());
 
     const selSingle = document.getElementById("season-select");
     const selMin = document.getElementById("season-min");
@@ -668,6 +697,7 @@ async function init() {
       selSingle.value = allSeasons[0];
       selMin.value = ascending[0];
       selMax.value = ascending[ascending.length - 1];
+      updatePlayoffButton(allSeasons[0]);
     }
 
     // Fetch positions
