@@ -155,6 +155,7 @@ def game_player_defensive(game: Game, registry=None) -> list[PlayerDefensive]:
     """Aggregate per-defender defensive stats for a single game."""
     stats: dict[str, dict] = defaultdict(lambda: {
         "tackles": 0, "sacks": 0.0, "interceptions": 0, "fumble_recoveries": 0,
+        "forced_fumbles": 0,
     })
 
     for p in game.plays:
@@ -166,6 +167,8 @@ def game_player_defensive(game: Game, registry=None) -> list[PlayerDefensive]:
             stats[p.interceptor]["interceptions"] += 1
         if p.fumble_recoverer:
             stats[p.fumble_recoverer]["fumble_recoveries"] += 1
+        if p.fumble and p.tackler:
+            stats[p.tackler]["forced_fumbles"] += 1
 
     result = []
     for player, s in stats.items():
@@ -203,6 +206,7 @@ def game_team_stats(game: Game) -> list[TeamGame]:
             "pass_comp": 0, "pass_att": 0, "pass_yards": 0, "pass_td": 0,
             "rush_att": 0, "rush_yards": 0, "rush_td": 0,
             "first_downs": 0, "interceptions_thrown": 0, "fumbles_lost": 0,
+            "forced_fumbles": 0, "fumble_recoveries": 0,
             "third_down_att": 0, "third_down_conv": 0,
             "sacks_taken": 0, "sacks_made": 0,
         }
@@ -242,8 +246,15 @@ def game_team_stats(game: Game) -> list[TeamGame]:
             if opp in t:
                 t[opp]["sacks_made"] += 1
 
-        if p.fumble_lost:
-            s["fumbles_lost"] += 1
+        if p.fumble:
+            if p.tackler and opp in t:
+                t[opp]["forced_fumbles"] += 1
+            if p.fumble_lost:
+                s["fumbles_lost"] += 1
+                if opp in t:
+                    t[opp]["fumble_recoveries"] += 1
+            else:
+                s["fumble_recoveries"] += 1
         if p.first_down:
             s["first_downs"] += 1
 

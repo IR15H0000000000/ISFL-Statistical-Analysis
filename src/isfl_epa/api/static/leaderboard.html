@@ -252,6 +252,7 @@
     <a href="/static/teams.html">Teams</a>
     <a href="/static/leaderboard.html" class="active">Players</a>
     <a href="/static/plays.html">Plays</a>
+    <a href="/static/visualizations.html">Viz</a>
   </div>
   <nav>
     <button id="btn-passing" class="active" onclick="switchCategory('passing')">Passing</button>
@@ -386,6 +387,7 @@ const COLUMNS_DEFENSE = [
   { key: "tackles",         label: "Tkl",     fmt: "int",  align: "right",  epa: false },
   { key: "sacks",           label: "Sck",     fmt: "dec1", align: "right",  epa: false },
   { key: "interceptions",   label: "INT",     fmt: "int",  align: "right",  epa: false },
+  { key: "forced_fumbles",   label: "FF",     fmt: "int",  align: "right",  epa: false },
   { key: "fumble_recoveries",label: "FR",     fmt: "int",  align: "right",  epa: false },
   { key: "def_epa",         label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
   { key: "def_plays",       label: "Plays",   fmt: "int",  align: "right",  epa: false },

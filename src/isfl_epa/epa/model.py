@@ -161,7 +161,10 @@ class EPModel:
         probs = self.model.predict_proba(X_input)
         return pd.DataFrame(probs, columns=self.classes_, index=X.index)
 
-    def evaluate(self, X: pd.DataFrame, y: pd.Series) -> dict:
+    def evaluate(
+        self, X: pd.DataFrame, y: pd.Series,
+        sample_weight: np.ndarray | None = None,
+    ) -> dict:
         """Evaluate model on test data."""
         X_input = X
         if self.scaler is not None:
@@ -172,8 +175,8 @@ class EPModel:
         if self.model_type == "hgb_reg":
             preds = self.model.predict(X_input)
             return {
-                "mae": mean_absolute_error(y, preds),
-                "r2": r2_score(y, preds),
+                "mae": mean_absolute_error(y, preds, sample_weight=sample_weight),
+                "r2": r2_score(y, preds, sample_weight=sample_weight),
                 "n_samples": len(y),
             }
 

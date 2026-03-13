@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISFL EPA Visualizations</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a2e;
+  }
+
+  header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 2rem 2rem 1.5rem;
+    text-align: center;
+  }
+
+  header .label {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    color: #56d6d6;
+    margin-bottom: 0.5rem;
+  }
+
+  header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .header-nav {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+  }
+
+  .header-nav a {
+    color: #8888aa;
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    transition: color 0.2s;
+  }
+  .header-nav a:hover { color: #ccc; }
+  .header-nav a.active { color: #56d6d6; }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    max-width: 1100px;
+    margin: 1.5rem auto 0.75rem;
+    padding: 0 1rem;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 0;
+  }
+
+  .mode-toggle button {
+    padding: 0.45rem 1rem;
+    border: 1px solid #ccc;
+    background: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: #666;
+  }
+  .mode-toggle button:first-child { border-radius: 4px 0 0 4px; }
+  .mode-toggle button:last-child { border-radius: 0 4px 4px 0; }
+  .mode-toggle button.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
+
+  .charts-wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 1rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+  }
+
+  .chart-card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    padding: 1.5rem;
+  }
+
+  .chart-card h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #1a1a2e;
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .chart-container {
+    position: relative;
+    height: 380px;
+  }
+
+  .loading {
+    text-align: center;
+    padding: 3rem;
+    color: #888;
+    font-size: 1rem;
+  }
+
+  footer {
+    background: #1a1a2e;
+    color: #666;
+    text-align: center;
+    padding: 2rem;
+    font-size: 0.8rem;
+  }
+  footer a { color: #56d6d6; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="label">EPA Model</div>
+  <h1>Visualizations</h1>
+  <div class="header-nav">
+    <a href="/static/teams.html">Teams</a>
+    <a href="/static/leaderboard.html">Players</a>
+    <a href="/static/plays.html">Plays</a>
+    <a href="/static/visualizations.html" class="active">Viz</a>
+  </div>
+</header>
+
+<div class="controls">
+  <div class="mode-toggle">
+    <button id="era-legacy" onclick="switchEra('legacy')">Legacy (S1–26)</button>
+    <button id="era-modern" class="active" onclick="switchEra('modern')">Modern (S27+)</button>
+  </div>
+  <div class="mode-toggle">
+    <button id="gt-regular" class="active" onclick="switchGameType('regular')">Regular</button>
+    <button id="gt-playoff" onclick="switchGameType('playoff')">Playoffs</button>
+  </div>
+</div>
+
+<div class="charts-wrap">
+  <div class="loading" id="loading">Loading...</div>
+
+  <div class="chart-card" id="card-distance" style="display:none">
+    <h2>Expected Points by Distance to First Down</h2>
+    <div class="chart-container">
+      <canvas id="chart-distance"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card" id="card-yardline" style="display:none">
+    <h2>Expected Points by Distance to Endzone</h2>
+    <div class="chart-container">
+      <canvas id="chart-yardline"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card" id="card-time" style="display:none">
+    <h2>Expected Points by Time Remaining in Half</h2>
+    <div class="chart-container">
+      <canvas id="chart-time"></canvas>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <p>ISFL EPA &mdash; <a href="/static/teams.html">Teams</a> | <a href="/static/leaderboard.html">Players</a> | <a href="/docs">API Docs</a></p>
+</footer>
+
+<script>
+let currentEra = "modern";
+let currentGameType = "regular";
+let distanceChart = null;
+let yardlineChart = null;
+let timeChart = null;
+
+const PASS_COLOR = "rgb(86, 214, 214)";
+const RUSH_COLOR = "rgb(255, 159, 64)";
+const PASS_BG = "rgba(86, 214, 214, 0.1)";
+const RUSH_BG = "rgba(255, 159, 64, 0.1)";
+
+const DOWN_COLORS = {
+  1: { border: "rgb(86, 214, 214)",  bg: "rgba(86, 214, 214, 0.1)",  label: "1st Down" },
+  2: { border: "rgb(255, 159, 64)",  bg: "rgba(255, 159, 64, 0.1)",  label: "2nd Down" },
+  3: { border: "rgb(153, 102, 255)", bg: "rgba(153, 102, 255, 0.1)", label: "3rd Down" },
+  4: { border: "rgb(255, 99, 132)",  bg: "rgba(255, 99, 132, 0.1)",  label: "4th Down" },
+};
+
+function chartOptions(xLabel, yLabel) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { position: "top" },
+      tooltip: {
+        callbacks: {
+          afterLabel: function(ctx) {
+            const ds = ctx.dataset;
+            const counts = ds._counts;
+            return counts ? `n = ${counts[ctx.dataIndex].toLocaleString()}` : "";
+          }
+        }
+      }
+    },
+    scales: {
+      x: {
+        title: { display: true, text: xLabel, font: { weight: "bold" } },
+      },
+      y: {
+        title: { display: true, text: yLabel, font: { weight: "bold" } },
+      }
+    }
+  };
+}
+
+function buildDatasets(passData, rushData, labelKey) {
+  return {
+    labels: [...new Set([...passData.map(d => d[labelKey]), ...rushData.map(d => d[labelKey])])].sort((a, b) => a - b),
+    pass: passData,
+    rush: rushData,
+  };
+}
+
+function makeLineDatasets(allLabels, passData, rushData, labelKey) {
+  const passMap = new Map(passData.map(d => [d[labelKey], d]));
+  const rushMap = new Map(rushData.map(d => [d[labelKey], d]));
+
+  return [
+    {
+      label: "Pass",
+      data: allLabels.map(l => passMap.has(l) ? passMap.get(l).avg_ep : null),
+      _counts: allLabels.map(l => passMap.has(l) ? passMap.get(l).count : 0),
+      borderColor: PASS_COLOR,
+      backgroundColor: PASS_BG,
+      tension: 0.3,
+      pointRadius: 3,
+      fill: false,
+    },
+    {
+      label: "Rush",
+      data: allLabels.map(l => rushMap.has(l) ? rushMap.get(l).avg_ep : null),
+      _counts: allLabels.map(l => rushMap.has(l) ? rushMap.get(l).count : 0),
+      borderColor: RUSH_COLOR,
+      backgroundColor: RUSH_BG,
+      tension: 0.3,
+      pointRadius: 3,
+      fill: false,
+    },
+  ];
+}
+
+function getParams() {
+  const params = new URLSearchParams();
+  if (currentEra === "legacy") {
+    params.set("season_min", 1);
+    params.set("season_max", 26);
+  } else {
+    params.set("season_min", 27);
+    params.set("season_max", 999);
+  }
+  params.set("game_type", currentGameType);
+  return params;
+}
+
+function switchEra(era) {
+  currentEra = era;
+  document.getElementById("era-legacy").classList.toggle("active", era === "legacy");
+  document.getElementById("era-modern").classList.toggle("active", era === "modern");
+  reloadCharts();
+}
+
+async function reloadCharts() {
+  document.getElementById("loading").style.display = "";
+  document.getElementById("card-distance").style.display = "none";
+  document.getElementById("card-yardline").style.display = "none";
+  document.getElementById("card-time").style.display = "none";
+
+  const params = getParams();
+
+  try {
+    const [distResp, ylResp, timeResp] = await Promise.all([
+      fetch(`/epa/viz/ep-by-distance?${params}`),
+      fetch(`/epa/viz/ep-by-yardline?${params}`),
+      fetch(`/epa/viz/ep-by-time?${params}`),
+    ]);
+
+    if (!distResp.ok || !ylResp.ok || !timeResp.ok) throw new Error("Server error");
+
+    const distData = await distResp.json();
+    const ylData = await ylResp.json();
+    const timeData = await timeResp.json();
+
+    document.getElementById("loading").style.display = "none";
+
+    // --- Distance chart (by down) ---
+    const distLabels = [...new Set(distData.map(d => d.distance))].sort((a, b) => a - b);
+    const distDatasets = [1, 2, 3, 4].map(down => {
+      const downData = distData.filter(d => d.down === down);
+      const downMap = new Map(downData.map(d => [d.distance, d]));
+      const cfg = DOWN_COLORS[down];
+      return {
+        label: cfg.label,
+        data: distLabels.map(l => downMap.has(l) ? downMap.get(l).avg_ep : null),
+        _counts: distLabels.map(l => downMap.has(l) ? downMap.get(l).count : 0),
+        borderColor: cfg.border,
+        backgroundColor: cfg.bg,
+        tension: 0.3,
+        pointRadius: 3,
+        fill: false,
+      };
+    });
+
+    if (distanceChart) distanceChart.destroy();
+    document.getElementById("card-distance").style.display = "";
+    distanceChart = new Chart(document.getElementById("chart-distance"), {
+      type: "line",
+      data: { labels: distLabels, datasets: distDatasets },
+      options: chartOptions("Distance to First Down (yards)", "Expected Points"),
+    });
+
+    // --- Yardline chart (by down) ---
+    const ylLabels = [...new Set(ylData.map(d => d.yardline))].sort((a, b) => a - b);
+    const ylDatasets = [1, 2, 3, 4].map(down => {
+      const downData = ylData.filter(d => d.down === down);
+      const downMap = new Map(downData.map(d => [d.yardline, d]));
+      const cfg = DOWN_COLORS[down];
+      return {
+        label: cfg.label,
+        data: ylLabels.map(l => downMap.has(l) ? downMap.get(l).avg_ep : null),
+        _counts: ylLabels.map(l => downMap.has(l) ? downMap.get(l).count : 0),
+        borderColor: cfg.border,
+        backgroundColor: cfg.bg,
+        tension: 0.3,
+        pointRadius: 3,
+        fill: false,
+      };
+    });
+
+    if (yardlineChart) yardlineChart.destroy();
+    document.getElementById("card-yardline").style.display = "";
+    yardlineChart = new Chart(document.getElementById("chart-yardline"), {
+      type: "line",
+      data: { labels: ylLabels, datasets: ylDatasets },
+      options: (() => { const o = chartOptions("Yards from Endzone", "Expected Points"); o.scales.x.reverse = true; return o; })(),
+    });
+
+    // --- Time chart (by down) ---
+    const timeLabels = [...new Set(timeData.map(d => d.minute))].sort((a, b) => a - b);
+    const timeDatasets = [1, 2, 3, 4].map(down => {
+      const downData = timeData.filter(d => d.down === down);
+      const downMap = new Map(downData.map(d => [d.minute, d]));
+      const cfg = DOWN_COLORS[down];
+      return {
+        label: cfg.label,
+        data: timeLabels.map(l => downMap.has(l) ? downMap.get(l).avg_ep : null),
+        _counts: timeLabels.map(l => downMap.has(l) ? downMap.get(l).count : 0),
+        borderColor: cfg.border,
+        backgroundColor: cfg.bg,
+        tension: 0.3,
+        pointRadius: 3,
+        fill: false,
+      };
+    });
+
+    if (timeChart) timeChart.destroy();
+    document.getElementById("card-time").style.display = "";
+    timeChart = new Chart(document.getElementById("chart-time"), {
+      type: "line",
+      data: { labels: timeLabels, datasets: timeDatasets },
+      options: chartOptions("Minutes Remaining in Half", "Expected Points"),
+    });
+
+  } catch (e) {
+    document.getElementById("loading").textContent = "Error: " + e.message;
+    document.getElementById("loading").style.display = "";
+  }
+}
+
+function switchGameType(gt) {
+  currentGameType = gt;
+  document.getElementById("gt-regular").classList.toggle("active", gt === "regular");
+  document.getElementById("gt-playoff").classList.toggle("active", gt === "playoff");
+  reloadCharts();
+}
+
+async function init() {
+  reloadCharts();
+}
+
+init();
+</script>
+</body>
+</html>

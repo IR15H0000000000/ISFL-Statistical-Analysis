@@ -34,13 +34,14 @@ def compute_epa_for_season(
     season: int,
     league: str,
     ep_model: EPModel | EPModelPair,
+    database_url: str | None = None,
 ) -> pd.DataFrame:
     """Compute EPA for all plays in a season.
 
     Returns the original DataFrame with added columns:
     ep_before, ep_after, epa.
     """
-    df = load_training_plays([season], league)
+    df = load_training_plays([season], league, database_url=database_url)
     if isinstance(ep_model, EPModelPair):
         model = ep_model.get_model(season)
         is_regression = model.model_type == "hgb_reg"

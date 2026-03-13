@@ -390,6 +390,10 @@ def parse_play(raw_play: dict, quarter: int, game_id: int) -> ParsedPlay:
     """Parse a single raw play dict into a ParsedPlay."""
     down, distance, distance_text = parse_down_distance(raw_play.get("t", ""))
     yl_team, yl = parse_field_position(raw_play.get("o", ""))
+    if distance is None and distance_text == "Goal" and yl is not None:
+        distance = yl
+    elif distance is None and distance_text == "inches":
+        distance = 1
     away_team, score_away, home_team, score_home = parse_score(raw_play.get("s"))
 
     desc = raw_play.get("m", "")

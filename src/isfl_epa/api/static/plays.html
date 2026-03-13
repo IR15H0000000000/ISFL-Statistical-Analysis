@@ -240,6 +240,60 @@
   .flag-fd  { background: #d1ecf1; color: #0c5460; }
   .flag-saf { background: #f8d7da; color: #721c24; }
 
+  .player-tag { white-space: nowrap; }
+  .player-tag + .player-tag::before { content: ", "; }
+  .role-badge {
+    display: inline-block;
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    background: rgba(86, 214, 214, 0.15);
+    color: #56d6d6;
+    margin-left: 2px;
+    vertical-align: baseline;
+  }
+
+  .player-search-wrap {
+    position: relative;
+  }
+
+  #player-search {
+    width: 180px;
+  }
+
+  .autocomplete-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    max-height: 240px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  }
+
+  .autocomplete-list .ac-item {
+    padding: 0.45rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .autocomplete-list .ac-item:last-child { border-bottom: none; }
+  .autocomplete-list .ac-item:hover,
+  .autocomplete-list .ac-item.ac-active { background: #e8f4f8; }
+
+  .autocomplete-list .ac-seasons {
+    font-size: 0.7rem;
+    color: #888;
+    margin-left: 0.4rem;
+  }
+
   .load-more-wrap {
     text-align: center;
     padding: 1.5rem 0 3rem;
@@ -278,6 +332,7 @@
     <a href="/static/teams.html">Teams</a>
     <a href="/static/leaderboard.html">Players</a>
     <a href="/static/plays.html" class="active">Plays</a>
+    <a href="/static/visualizations.html">Viz</a>
   </div>
   <nav>
     <button id="btn-offensive" class="active" onclick="switchSide('offensive')">Offensive</button>
@@ -315,6 +370,11 @@
     <select id="team-select" onchange="resetAndLoad()">
       <option value="">All</option>
     </select>
+  </div>
+  <div class="control-group player-search-wrap">
+    <label>Player:</label>
+    <input type="text" id="player-search" placeholder="Search player..." autocomplete="off">
+    <div class="autocomplete-list" id="ac-list" style="display:none"></div>
   </div>
   <div class="mode-toggle">
     <button id="gt-regular" class="active" onclick="switchGameType('regular')" style="font-size:0.75rem;padding:0.4rem 0.8rem">Regular</button>
@@ -354,6 +414,9 @@ let currentOffset = 0;
 let isLoading = false;
 let hasMore = true;
 let currentController = null;
+let selectedPlayerId = null;
+let acDebounceTimer = null;
+let acIndex = -1;
 
 // Sort state
 let sortBy = "season";
@@ -368,10 +431,10 @@ const COLUMNS = [
   { key: "yard_line",  label: "Yd Ln",      align: "right", sortable: false },
   { key: "off_team",   label: "Off",        align: "left",  sortable: false },
   { key: "play_type",  label: "Type",       align: "left",  sortable: false },
-  { key: "off_player", label: "Off Player", align: "left",  sortable: false },
+  { key: "off_player", label: "Off Players", align: "left",  sortable: false },
   { key: "yards_gained",label: "Yds",       align: "right", sortable: true  },
   { key: "def_team",   label: "Def",        align: "left",  sortable: false },
-  { key: "def_player", label: "Def Player", align: "left",  sortable: false },
+  { key: "def_player", label: "Def Players", align: "left",  sortable: false },
   { key: "flags",      label: "Flags",      align: "left",  sortable: false },
   { key: "epa",        label: "EPA",        align: "right", sortable: true  },
   { key: "description",label: "Description",align: "left",  sortable: false },
@@ -409,6 +472,19 @@ function epaColor(val) {
   const l = 95 - intensity * 35;
   const s = 40 + intensity * 30;
   return val > 0 ? `hsl(145, ${s}%, ${l}%)` : `hsl(0, ${s}%, ${l}%)`;
+}
+
+const ROLE_LABELS = {
+  passer: "QB", rusher: "RB", receiver: "WR",
+  tackler: "TK", sacker: "SK", interceptor: "INT", fumble_recoverer: "FR",
+};
+
+function renderPlayers(players) {
+  if (!players || players.length === 0) return "—";
+  return players.map(p => {
+    const role = ROLE_LABELS[p.role] || p.role;
+    return `<span class="player-tag">${p.name} <span class="role-badge">${role}</span></span>`;
+  }).join(" ");
 }
 
 function renderFlags(play) {
@@ -474,7 +550,7 @@ function appendRows(plays) {
           td.textContent = play.play_type || "—";
           break;
         case "off_player":
-          td.textContent = play.off_player || "—";
+          td.innerHTML = renderPlayers(play.off_players);
           break;
         case "yards_gained":
           td.textContent = play.yards_gained != null ? play.yards_gained : "—";
@@ -483,7 +559,7 @@ function appendRows(plays) {
           td.textContent = play.def_team || "—";
           break;
         case "def_player":
-          td.textContent = play.def_player || "—";
+          td.innerHTML = renderPlayers(play.def_players);
           break;
         case "flags":
           td.innerHTML = renderFlags(play) || "—";
@@ -521,6 +597,7 @@ function getParams(offset) {
   if (pos) params.set("position", pos);
   const team = document.getElementById("team-select").value;
   if (team) params.set("team", team);
+  if (selectedPlayerId) params.set("player_id", selectedPlayerId);
   params.set("side", currentSide);
   params.set("game_type", currentGameType);
   params.set("sort_by", sortBy);
@@ -599,13 +676,35 @@ function loadMore() {
   loadPlays(true);
 }
 
-function switchSide(side) {
+async function switchSide(side) {
   currentSide = side;
   document.getElementById("btn-offensive").classList.toggle("active", side === "offensive");
   document.getElementById("btn-defensive").classList.toggle("active", side === "defensive");
-  // Reset position since positions available differ by side context
-  document.getElementById("pos-select").value = "";
+  // Clear player search on side switch
+  clearPlayerSearch();
+  // Reload positions filtered by side
+  await updatePositionDropdown(side);
   resetAndLoad();
+}
+
+async function updatePositionDropdown(side) {
+  const posSel = document.getElementById("pos-select");
+  const prev = posSel.value;
+  posSel.innerHTML = '<option value="">All</option>';
+  try {
+    const resp = await fetch(`/epa/positions?side=${side}`);
+    const positions = await resp.json();
+    positions.forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p; opt.textContent = p;
+      posSel.appendChild(opt);
+    });
+    // Keep previous selection if still valid
+    if (positions.includes(prev)) posSel.value = prev;
+    else posSel.value = "";
+  } catch (e) {
+    console.error("Failed to load positions", e);
+  }
 }
 
 function switchGameType(gt) {
@@ -625,18 +724,112 @@ function updatePlayoffButton(season) {
   }
 }
 
+function clearPlayerSearch() {
+  document.getElementById("player-search").value = "";
+  selectedPlayerId = null;
+  hideAcList();
+}
+
+function hideAcList() {
+  const list = document.getElementById("ac-list");
+  list.style.display = "none";
+  list.innerHTML = "";
+  acIndex = -1;
+}
+
+function showAcResults(results) {
+  const list = document.getElementById("ac-list");
+  if (!results.length) { hideAcList(); return; }
+  list.innerHTML = "";
+  results.forEach((p, i) => {
+    const div = document.createElement("div");
+    div.className = "ac-item";
+    div.innerHTML = `${p.canonical_name}<span class="ac-seasons">S${p.first_seen_season}–S${p.last_seen_season}</span>`;
+    div.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      selectPlayer(p);
+    });
+    list.appendChild(div);
+  });
+  acIndex = -1;
+  list.style.display = "";
+}
+
+function selectPlayer(p) {
+  document.getElementById("player-search").value = p.canonical_name;
+  selectedPlayerId = p.player_id;
+  hideAcList();
+  resetAndLoad();
+}
+
+function updateAcHighlight() {
+  const items = document.querySelectorAll("#ac-list .ac-item");
+  items.forEach((el, i) => el.classList.toggle("ac-active", i === acIndex));
+}
+
+async function fetchPlayerSuggestions(query) {
+  try {
+    const resp = await fetch(`/players/?name=${encodeURIComponent(query)}&limit=10`);
+    if (!resp.ok) return [];
+    return await resp.json();
+  } catch { return []; }
+}
+
+function initPlayerSearch() {
+  const input = document.getElementById("player-search");
+
+  input.addEventListener("input", () => {
+    const val = input.value.trim();
+    // If user edits text after selecting, clear the selection
+    if (selectedPlayerId) {
+      selectedPlayerId = null;
+      resetAndLoad();
+    }
+    clearTimeout(acDebounceTimer);
+    if (val.length < 2) { hideAcList(); return; }
+    acDebounceTimer = setTimeout(async () => {
+      const results = await fetchPlayerSuggestions(val);
+      showAcResults(results);
+    }, 300);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    const items = document.querySelectorAll("#ac-list .ac-item");
+    if (!items.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      acIndex = Math.min(acIndex + 1, items.length - 1);
+      updateAcHighlight();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      acIndex = Math.max(acIndex - 1, 0);
+      updateAcHighlight();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (acIndex >= 0 && acIndex < items.length) {
+        items[acIndex].dispatchEvent(new MouseEvent("mousedown"));
+      }
+    } else if (e.key === "Escape") {
+      hideAcList();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    // Delay to allow mousedown on ac-item to fire
+    setTimeout(hideAcList, 150);
+  });
+}
+
 async function init() {
   try {
-    const [seasonsResp, playoffResp, posResp, teamsResp] = await Promise.all([
+    const [seasonsResp, playoffResp, teamsResp] = await Promise.all([
       fetch("/epa/seasons"),
       fetch("/epa/seasons?game_type=playoff"),
-      fetch("/epa/positions"),
       fetch("/epa/teams"),
     ]);
 
     allSeasons = await seasonsResp.json();
     playoffSeasons = new Set(await playoffResp.json());
-    const positions = await posResp.json();
     const teams = await teamsResp.json();
 
     const selMin = document.getElementById("season-min");
@@ -659,13 +852,8 @@ async function init() {
       updatePlayoffButton(+selMax.value);
     }
 
-    // Position dropdown
-    const posSel = document.getElementById("pos-select");
-    positions.forEach(p => {
-      const opt = document.createElement("option");
-      opt.value = p; opt.textContent = p;
-      posSel.appendChild(opt);
-    });
+    // Position dropdown – filtered by initial side
+    await updatePositionDropdown(currentSide);
 
     // Team dropdown
     const teamSel = document.getElementById("team-select");
@@ -680,6 +868,7 @@ async function init() {
       updatePlayoffButton(+this.value);
     });
 
+    initPlayerSearch();
     buildHeaders();
     loadPlays(false);
   } catch (e) {

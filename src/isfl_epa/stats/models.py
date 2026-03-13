@@ -56,6 +56,7 @@ class PlayerDefensive(BaseModel):
     sacks: float = 0
     interceptions: int = 0
     fumble_recoveries: int = 0
+    forced_fumbles: int = 0
 
 
 class TeamGame(BaseModel):
@@ -82,6 +83,8 @@ class TeamGame(BaseModel):
     # Turnovers
     interceptions_thrown: int = 0
     fumbles_lost: int = 0
+    forced_fumbles: int = 0
+    fumble_recoveries: int = 0
     turnovers: int = 0
     # Situational
     third_down_att: int = 0

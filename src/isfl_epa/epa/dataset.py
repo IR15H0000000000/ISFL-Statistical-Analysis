@@ -21,7 +21,6 @@ from isfl_epa.epa.features import (
     prepare_features,
     valid_play_mask,
 )
-from isfl_epa.storage.parquet import DATA_DIR, read_season_plays
 
 logger = logging.getLogger(__name__)
 
@@ -272,93 +271,53 @@ def _filter_preseason_from_parquet(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_training_plays(seasons, league: str = "ISFL") -> pd.DataFrame:
-    """Load and concatenate plays from Parquet and/or database.
+def load_training_plays(
+    seasons, league: str = "ISFL", database_url: str | None = None,
+) -> pd.DataFrame:
+    """Load and concatenate plays from PostgreSQL.
 
-    Strategy:
-    - S1-26 (parquet): Load from parquet, reconstruct scores from scoring
-      flags, infer team abbreviations from kickoff patterns.
-    - S27-59 (DB): Load from PostgreSQL, derive possession_team from
-      home_team/away_team + possession_team_id.
+    All seasons are loaded from the database. For S1-26, scores are
+    reconstructed from scoring flags and teams inferred from kickoff patterns.
+    For S27+, possession_team is derived from home_team/away_team.
     """
-    parquet_frames = []
-    db_seasons = []
+    from sqlalchemy import select
 
-    for s in seasons:
-        # S27+ always load from DB (preserves play `id` for play_epa table).
-        # Parquets are only the primary source for S1-26.
-        if s >= 27:
-            db_seasons.append(s)
-        else:
-            path = DATA_DIR / f"{league}_S{s}_plays.parquet"
-            if path.exists():
-                parquet_frames.append(read_season_plays(s, league))
-            else:
-                db_seasons.append(s)
+    from isfl_epa.storage.database import get_engine, plays_table
 
-    # Load DB seasons (single query for all seasons, excluding preseason)
-    db_frames = []
-    if db_seasons:
-        from sqlalchemy import select
-
-        from isfl_epa.storage.database import get_engine, plays_table
-
-        engine = get_engine()
-        with engine.connect() as conn:
-            stmt = (
-                select(plays_table)
-                .where(
-                    plays_table.c.season.in_(db_seasons)
-                    & (plays_table.c.league == league)
-                    & (plays_table.c.game_type != "preseason")
-                )
-                .order_by(
-                    plays_table.c.game_id,
-                    plays_table.c.play_index,
-                )
+    engine = get_engine(database_url)
+    with engine.connect() as conn:
+        stmt = (
+            select(plays_table)
+            .where(
+                plays_table.c.season.in_(list(seasons))
+                & (plays_table.c.league == league)
+                & (plays_table.c.game_type != "preseason")
             )
-            db_chunk = pd.read_sql(stmt, conn)
-            if not db_chunk.empty:
-                db_frames.append(db_chunk)
+            .order_by(
+                plays_table.c.game_id,
+                plays_table.c.play_index,
+            )
+        )
+        db_df = pd.read_sql(stmt, conn)
 
-    # Process parquet data (S1-26): reconstruct scores + infer teams
-    if parquet_frames:
-        pq_df = pd.concat(parquet_frames, ignore_index=True)
-        # Filter out preseason games using the games table
-        pq_df = _filter_preseason_from_parquet(pq_df)
-        if pq_df["score_away"].isna().any():
-            pq_df = _reconstruct_scores_df(pq_df)
-        if "possession_team" not in pq_df.columns:
-            pq_df["possession_team"] = None
-        if pq_df["possession_team"].isna().any():
-            pq_df = _fill_team_info(pq_df)
-    else:
-        pq_df = None
-
-    # Process DB data (S27-59): derive possession_team from home/away
-    if db_frames:
-        db_df = pd.concat(db_frames, ignore_index=True)
-        if "possession_team" not in db_df.columns:
-            db_df["possession_team"] = None
-        # For rows with home_team but no possession_team, derive it
-        needs_poss = db_df["possession_team"].isna() & db_df["home_team"].notna()
-        if needs_poss.any():
-            derived = _derive_possession_team_from_home_away(db_df.loc[needs_poss])
-            db_df.loc[needs_poss, "possession_team"] = derived
-        # For rows missing both (S1-26 in DB), use kickoff inference
-        still_missing = db_df["possession_team"].isna()
-        if still_missing.any():
-            if db_df.loc[still_missing, "score_away"].isna().any():
-                db_df = _reconstruct_scores_df(db_df)
-            db_df = _fill_team_info(db_df)
-    else:
-        db_df = None
-
-    # Combine
-    frames = [f for f in [pq_df, db_df] if f is not None]
-    if not frames:
+    if db_df.empty:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+
+    if "possession_team" not in db_df.columns:
+        db_df["possession_team"] = None
+    # For rows with home_team but no possession_team, derive it
+    needs_poss = db_df["possession_team"].isna() & db_df["home_team"].notna()
+    if needs_poss.any():
+        derived = _derive_possession_team_from_home_away(db_df.loc[needs_poss])
+        db_df.loc[needs_poss, "possession_team"] = derived
+    # For rows missing both (S1-26 in DB), use kickoff inference
+    still_missing = db_df["possession_team"].isna()
+    if still_missing.any():
+        if db_df.loc[still_missing, "score_away"].isna().any():
+            db_df = _reconstruct_scores_df(db_df)
+        db_df = _fill_team_info(db_df)
+
+    return db_df
 
 
 # ---------------------------------------------------------------------------

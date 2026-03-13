@@ -465,13 +465,13 @@ def _train_era(
     train_df = load_training_plays(cfg["train_seasons"], league_value)
     console.print(f"  {len(train_df):,} plays loaded")
 
+    w_train = None
+    w_test = None
     if is_regression:
         console.print("  Labeling drive outcomes...")
         train_df = label_drive_outcome(train_df)
         console.print("  Building feature matrix...")
-        X_train, y_train, _, is_start = build_drive_feature_matrix(train_df)
-        X_train = X_train[is_start]
-        y_train = y_train[is_start]
+        X_train, y_train, w_train, _ = build_drive_feature_matrix(train_df)
     else:
         console.print("  Labeling next-score events...")
         train_df = label_next_score(train_df)
@@ -483,17 +483,15 @@ def _train_era(
     test_df = load_training_plays(cfg["test_seasons"], league_value)
     if is_regression:
         test_df = label_drive_outcome(test_df)
-        X_test, y_test, _, is_start_test = build_drive_feature_matrix(test_df)
-        X_test = X_test[is_start_test]
-        y_test = y_test[is_start_test]
+        X_test, y_test, w_test, _ = build_drive_feature_matrix(test_df)
     else:
         test_df = label_next_score(test_df)
         X_test, y_test = build_era_feature_matrix(test_df)
     console.print(f"  {len(X_test):,} test samples")
 
     ep = EPModel()
-    train_metrics = ep.train(X_train, y_train, model_type=model_type)
-    test_metrics = ep.evaluate(X_test, y_test)
+    train_metrics = ep.train(X_train, y_train, model_type=model_type, sample_weight=w_train)
+    test_metrics = ep.evaluate(X_test, y_test, sample_weight=w_test)
 
     if is_regression:
         console.print(f"  Train MAE: {train_metrics['train_mae']:.4f}")
@@ -522,8 +520,6 @@ def compute_epa(
         get_engine,
         load_epa_season,
     )
-    from isfl_epa.storage.parquet import write_epa_results
-
     if model_path:
         console.print(f"Loading EP model from {model_path}...")
         ep_model = EPModel.load(model_path)
@@ -532,17 +528,13 @@ def compute_epa(
         ep_model = EPModelPair.load()
 
     console.print(f"Computing EPA for {league.value} S{season}...")
-    epa_df = compute_epa_for_season(season, league.value, ep_model)
+    epa_df = compute_epa_for_season(season, league.value, ep_model, database_url=database_url)
     valid_count = epa_df["epa"].notna().sum()
     console.print(f"  {valid_count:,} plays with EPA (of {len(epa_df):,} total)")
 
     if valid_count > 0:
         mean_epa = epa_df["epa"].dropna().mean()
         console.print(f"  Mean EPA: {mean_epa:.4f}")
-
-    # Write Parquet
-    parquet_path = write_epa_results(epa_df, season, league.value)
-    console.print(f"  Wrote Parquet: {parquet_path}")
 
     # Load into PostgreSQL
     engine = get_engine(database_url)

@@ -178,6 +178,8 @@ team_games_table = Table(
     Column("first_downs", Integer, default=0),
     Column("interceptions_thrown", Integer, default=0),
     Column("fumbles_lost", Integer, default=0),
+    Column("forced_fumbles", Integer, default=0),
+    Column("fumble_recoveries", Integer, default=0),
     Column("turnovers", Integer, default=0),
     Column("third_down_att", Integer, default=0),
     Column("third_down_conv", Integer, default=0),
@@ -186,6 +188,7 @@ team_games_table = Table(
     Index("ix_team_games_season", "season"),
     Index("ix_team_games_team", "team"),
     Index("ix_team_games_game_id", "game_id"),
+    Index("ix_team_games_season_gt", "season", "game_type"),
 )
 
 player_game_passing_table = Table(
@@ -255,6 +258,7 @@ player_game_defensive_table = Table(
     Column("sacks", Float, default=0),
     Column("interceptions", Integer, default=0),
     Column("fumble_recoveries", Integer, default=0),
+    Column("forced_fumbles", Integer, default=0),
     Index("ix_pgd_player_id", "player_id"),
     Index("ix_pgd_season", "season"),
 )
@@ -318,13 +322,16 @@ team_season_epa_table = Table(
     Column("team", String(50), nullable=False),
     Column("season", Integer, nullable=False),
     Column("game_type", String(20), server_default="regular"),
+    Column("side", String(20), server_default="offensive"),
     Column("total_epa", Float, default=0),
     Column("pass_epa", Float, default=0),
     Column("rush_epa", Float, default=0),
     Column("plays", Integer, default=0),
     Column("epa_per_play", Float, default=0),
+    Column("success_rate", Float, default=0),
     Index("ix_tse_season", "season"),
     Index("ix_tse_team", "team"),
+    Index("ix_tse_season_gt_side", "season", "game_type", "side"),
 )
 
 # ---------------------------------------------------------------------------
@@ -339,11 +346,33 @@ def get_engine(database_url: str | None = None) -> Engine:
 
 def create_tables(engine: Engine) -> None:
     metadata.create_all(engine)
-    # Migration: add player_id_fumble_recoverer if not present (idempotent)
+    # Migrations use IF NOT EXISTS — PostgreSQL only (SQLite gets columns via create_all)
+    if engine.dialect.name != "postgresql":
+        return
     with engine.connect() as conn:
         conn.execute(text(
             "ALTER TABLE plays ADD COLUMN IF NOT EXISTS "
             "player_id_fumble_recoverer INTEGER REFERENCES players(player_id)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE team_season_epa ADD COLUMN IF NOT EXISTS "
+            "side VARCHAR(20) DEFAULT 'offensive'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE team_season_epa ADD COLUMN IF NOT EXISTS "
+            "success_rate FLOAT DEFAULT 0"
+        ))
+        conn.execute(text(
+            "ALTER TABLE player_game_defensive ADD COLUMN IF NOT EXISTS "
+            "forced_fumbles INTEGER DEFAULT 0"
+        ))
+        conn.execute(text(
+            "ALTER TABLE team_games ADD COLUMN IF NOT EXISTS "
+            "forced_fumbles INTEGER DEFAULT 0"
+        ))
+        conn.execute(text(
+            "ALTER TABLE team_games ADD COLUMN IF NOT EXISTS "
+            "fumble_recoveries INTEGER DEFAULT 0"
         ))
         conn.commit()
 
@@ -891,37 +920,149 @@ def _upsert_defensive_epa(conn, valid, season: int, strip_fn, game_type: str = "
 
 
 def _load_team_epa(conn, epa_df, season: int, game_type: str = "regular") -> None:
-    """Aggregate and insert per-team EPA stats."""
+    """Aggregate and insert per-team EPA stats (offensive + defensive + success rates)."""
+    import numpy as np
+
     valid = epa_df.dropna(subset=["epa"])
     scrimmage = valid[valid["play_type"].isin(["pass", "rush", "sack"])]
     if scrimmage.empty:
         return
 
+    # --- Offensive EPA ---
     team_agg = scrimmage.groupby("possession_team").agg(
         total_epa=("epa", "sum"),
         plays=("epa", "count"),
     ).reset_index()
     team_agg["epa_per_play"] = team_agg["total_epa"] / team_agg["plays"]
 
-    # Pass/rush split
     pass_epa = scrimmage[scrimmage["play_type"].isin(["pass", "sack"])].groupby("possession_team")["epa"].sum()
     rush_epa = scrimmage[scrimmage["play_type"] == "rush"].groupby("possession_team")["epa"].sum()
 
-    rows = [
+    # --- Offensive success rate ---
+    off_success = _compute_success_rates(scrimmage, offensive=True)
+
+    off_rows = [
         {
             "team": row.possession_team,
             "season": season,
             "game_type": game_type,
+            "side": "offensive",
             "total_epa": float(row.total_epa),
             "pass_epa": float(pass_epa.get(row.possession_team, 0)),
             "rush_epa": float(rush_epa.get(row.possession_team, 0)),
             "plays": int(row.plays),
             "epa_per_play": float(row.epa_per_play),
+            "success_rate": float(off_success.get(row.possession_team, 0)),
         }
         for row in team_agg.itertuples(index=False)
     ]
-    if rows:
-        conn.execute(insert(team_season_epa_table), rows)
+
+    # --- Defensive EPA (EPA allowed by each team) ---
+    # Build per-game team pairs for quick defending-team lookup
+    game_teams = scrimmage.groupby("game_id")["possession_team"].apply(
+        lambda s: set(s.dropna().unique())
+    ).to_dict()
+
+    def_records: dict[str, dict] = {}
+    for row in scrimmage.itertuples(index=False):
+        poss = row.possession_team
+        if not poss:
+            continue
+        opponents = game_teams.get(row.game_id, set())
+        defs = opponents - {poss}
+        if not defs:
+            continue
+        def_team = next(iter(defs))
+        rec = def_records.setdefault(def_team, {"total_epa": 0, "pass_epa": 0, "rush_epa": 0, "plays": 0})
+        rec["total_epa"] += row.epa
+        rec["plays"] += 1
+        if row.play_type in ("pass", "sack"):
+            rec["pass_epa"] += row.epa
+        elif row.play_type == "rush":
+            rec["rush_epa"] += row.epa
+
+    # --- Defensive success rate ---
+    def_success = _compute_success_rates(scrimmage, offensive=False, game_teams=game_teams)
+
+    def_rows = [
+        {
+            "team": team,
+            "season": season,
+            "game_type": game_type,
+            "side": "defensive",
+            "total_epa": float(data["total_epa"]),
+            "pass_epa": float(data["pass_epa"]),
+            "rush_epa": float(data["rush_epa"]),
+            "plays": int(data["plays"]),
+            "epa_per_play": float(data["total_epa"] / data["plays"]) if data["plays"] else 0,
+            "success_rate": float(def_success.get(team, 0)),
+        }
+        for team, data in def_records.items()
+    ]
+
+    all_rows = off_rows + def_rows
+    if all_rows:
+        conn.execute(insert(team_season_epa_table), all_rows)
+
+
+def _compute_success_rates(
+    scrimmage, offensive: bool = True, game_teams: dict | None = None,
+) -> dict[str, float]:
+    """Compute PFR-style success rate per team from scrimmage plays DataFrame.
+
+    Returns {team: success_rate} where success_rate is 0.0-1.0.
+    """
+    usable = scrimmage[
+        scrimmage["down"].notna()
+        & scrimmage["distance"].notna()
+        & scrimmage["yards_gained"].notna()
+    ]
+    if usable.empty:
+        return {}
+
+    downs = usable["down"].values
+    distances = usable["distance"].values
+    yards = usable["yards_gained"].values
+
+    # Vectorized success check
+    success = (
+        ((downs == 1) & (yards >= distances * 0.4))
+        | ((downs == 2) & (yards >= distances * 0.6))
+        | ((downs >= 3) & (yards >= distances))
+    )
+
+    team_total: dict[str, int] = {}
+    team_success: dict[str, int] = {}
+
+    if offensive:
+        teams = usable["possession_team"].values
+        for i, team in enumerate(teams):
+            if not team:
+                continue
+            team_total[team] = team_total.get(team, 0) + 1
+            if success[i]:
+                team_success[team] = team_success.get(team, 0) + 1
+    else:
+        poss_teams = usable["possession_team"].values
+        game_ids = usable["game_id"].values
+        for i in range(len(poss_teams)):
+            poss = poss_teams[i]
+            if not poss:
+                continue
+            opponents = game_teams.get(game_ids[i], set()) if game_teams else set()
+            defs = opponents - {poss}
+            if not defs:
+                continue
+            def_team = next(iter(defs))
+            team_total[def_team] = team_total.get(def_team, 0) + 1
+            if success[i]:
+                team_success[def_team] = team_success.get(def_team, 0) + 1
+
+    return {
+        team: team_success.get(team, 0) / total
+        for team, total in team_total.items()
+        if total > 0
+    }
 
 
 def load_player_positions(

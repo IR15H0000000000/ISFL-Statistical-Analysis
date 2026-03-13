@@ -195,6 +195,7 @@
     <a href="/static/teams.html" style="color:#56d6d6;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Teams</a>
     <a href="/static/leaderboard.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Players</a>
     <a href="/static/plays.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Plays</a>
+    <a href="/static/visualizations.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Viz</a>
   </div>
   <nav>
     <button id="btn-offensive" class="active" onclick="switchSide('offensive')">Offensive</button>
@@ -248,6 +249,8 @@ const OFFENSIVE_COLUMNS = [
   { key: "rush_td",     label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
   { key: "sack_pct",    label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
   { key: "int_pct",     label: "Int %",       fmt: "pct1", align: "right",  epa: false },
+  { key: "fumbles_lost",      label: "FL", fmt: "int", align: "right", epa: false },
+  { key: "fumble_recoveries", label: "FR", fmt: "int", align: "right", epa: false },
 ];
 
 const DEFENSIVE_COLUMNS = [
@@ -267,6 +270,8 @@ const DEFENSIVE_COLUMNS = [
   { key: "rush_td",        label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
   { key: "sack_pct",       label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
   { key: "int_pct",        label: "Int %",       fmt: "pct1", align: "right",  epa: false },
+  { key: "forced_fumbles",    label: "FF", fmt: "int", align: "right", epa: false },
+  { key: "fumble_recoveries", label: "FR", fmt: "int", align: "right", epa: false },
 ];
 
 let currentData = [];
