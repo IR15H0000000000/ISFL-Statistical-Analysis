@@ -81,6 +81,11 @@ def plays_browser_redirect():
     return RedirectResponse(url="/static/plays.html")
 
 
+@app.get("/drives")
+def drives_redirect():
+    return RedirectResponse(url="/static/drives.html")
+
+
 def get_db_engine(app_instance: FastAPI = None) -> Engine:
     """Get the database engine from app state."""
     return app.state.engine

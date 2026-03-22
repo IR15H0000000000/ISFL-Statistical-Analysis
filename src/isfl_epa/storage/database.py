@@ -388,8 +388,13 @@ def _resolve_player_id(registry: PlayerRegistry, name: str | None, season: int, 
     return registry.get_or_create(name, season, team)
 
 
-def init_registry_from_db(engine: Engine, registry: PlayerRegistry) -> None:
-    """Seed an empty registry with existing player data so IDs are stable across builds."""
+def init_registry_from_db(engine: Engine, registry: PlayerRegistry, exclude_season: int | None = None) -> None:
+    """Seed an empty registry with existing player data so IDs are stable across builds.
+
+    Args:
+        exclude_season: If set, skip player_names from this season so a fresh
+            rebuild doesn't inherit stale name-to-id mappings for that season.
+    """
     with engine.connect() as conn:
         # Load canonical player records
         players = conn.execute(select(players_table)).fetchall()
@@ -403,7 +408,10 @@ def init_registry_from_db(engine: Engine, registry: PlayerRegistry) -> None:
                 registry._aliases[p.player_id] = []
 
         # Load all known name aliases so get_or_create finds them
-        rows = conn.execute(select(player_names_table)).fetchall()
+        stmt = select(player_names_table)
+        if exclude_season is not None:
+            stmt = stmt.where(player_names_table.c.season != exclude_season)
+        rows = conn.execute(stmt).fetchall()
         for row in rows:
             norm = _normalize(row.name)
             if norm not in registry._name_to_id:
@@ -413,9 +421,65 @@ def init_registry_from_db(engine: Engine, registry: PlayerRegistry) -> None:
             if alias not in registry._aliases[row.player_id]:
                 registry._aliases[row.player_id].append(alias)
 
+        # Fallback: populate name lookup from canonical names too.
+        # This catches players whose ONLY aliases are from the excluded season
+        # (e.g., rookies) and prevents duplicate player creation on re-build.
+        for p in players:
+            norm = _normalize(p.canonical_name)
+            if norm not in registry._name_to_id:
+                registry._name_to_id[norm] = p.player_id
+
         # Set next_id beyond the current max so new players get unique IDs
         max_id = conn.execute(select(func.max(players_table.c.player_id))).scalar() or 0
         registry._next_id = max_id + 1
+
+
+def seed_registry_from_roster(
+    registry: PlayerRegistry,
+    roster_entries: list[dict],
+    season: int,
+    team_id_to_abbr: dict[int, str],
+) -> int:
+    """Pre-seed registry with roster names+teams so PBP matching uses team context.
+
+    Each roster entry with a unique index_player_id creates a distinct player.
+    This resolves ambiguity when two different players share the same "Last, F." key
+    but are on different teams (e.g., "Smith, D." on SAR vs BAL).
+
+    Returns count of players seeded.
+    """
+    from isfl_epa.players.registry import _normalize
+
+    # Group by index_player_id to detect collisions
+    by_idx: dict[int, dict] = {}
+    for entry in roster_entries:
+        idx = entry.get("index_player_id")
+        if idx is not None:
+            by_idx[idx] = entry
+
+    # Detect name collisions: multiple index_player_ids sharing the same normalized name
+    norm_to_idxs: dict[str, list[int]] = {}
+    for idx_id, entry in by_idx.items():
+        norm = _normalize(entry["name"])
+        norm_to_idxs.setdefault(norm, []).append(idx_id)
+
+    # Names with multiple distinct index_player_ids = different people
+    ambiguous_norms = {norm for norm, idxs in norm_to_idxs.items() if len(idxs) > 1}
+
+    count = 0
+    for idx_id, entry in by_idx.items():
+        name = entry["name"]
+        norm = _normalize(name)
+        tid = entry.get("team_id")
+        team = team_id_to_abbr.get(tid) if tid else None
+
+        if norm in ambiguous_norms and team:
+            # Ambiguous name — force create via team-qualified key
+            registry.force_create_for_team(name, season, team)
+        else:
+            registry.get_or_create(name, season, team)
+        count += 1
+    return count
 
 
 def load_registry(engine: Engine, registry: PlayerRegistry) -> None:
@@ -444,7 +508,10 @@ def load_registry(engine: Engine, registry: PlayerRegistry) -> None:
                         name=alias["name"],
                         season=alias["season"],
                         team=alias["team"],
-                    ).on_conflict_do_nothing()
+                    ).on_conflict_do_update(
+                        index_elements=["name", "season"],
+                        set_={"player_id": pid, "team": alias["team"]},
+                    )
                 )
 
 
@@ -505,6 +572,8 @@ def load_season(
                 player_game_rushing_table,
                 player_game_passing_table,
                 team_games_table,
+                player_season_epa_table,
+                team_season_epa_table,
             ):
                 conn.execute(table.delete().where(table.c.season == season))
             # Delete play_epa before plays (FK constraint: play_epa.play_id → plays.id)
@@ -1008,28 +1077,16 @@ def _load_team_epa(conn, epa_df, season: int, game_type: str = "regular") -> Non
 def _compute_success_rates(
     scrimmage, offensive: bool = True, game_teams: dict | None = None,
 ) -> dict[str, float]:
-    """Compute PFR-style success rate per team from scrimmage plays DataFrame.
+    """Compute EPA-based success rate per team from scrimmage plays DataFrame.
 
+    A play is successful if EPA > 0.
     Returns {team: success_rate} where success_rate is 0.0-1.0.
     """
-    usable = scrimmage[
-        scrimmage["down"].notna()
-        & scrimmage["distance"].notna()
-        & scrimmage["yards_gained"].notna()
-    ]
+    usable = scrimmage[scrimmage["epa"].notna()]
     if usable.empty:
         return {}
 
-    downs = usable["down"].values
-    distances = usable["distance"].values
-    yards = usable["yards_gained"].values
-
-    # Vectorized success check
-    success = (
-        ((downs == 1) & (yards >= distances * 0.4))
-        | ((downs == 2) & (yards >= distances * 0.6))
-        | ((downs >= 3) & (yards >= distances))
-    )
+    success = usable["epa"].values > 0
 
     team_total: dict[str, int] = {}
     team_success: dict[str, int] = {}
@@ -1133,8 +1190,14 @@ def get_team_id_to_abbr(engine: Engine, season: int) -> dict[int, str]:
     {home_team, away_team} across all games.  After 2+ games vs different
     opponents, only the correct team remains.
     """
+    return get_team_id_to_abbr_multi(engine, [season])
+
+
+def get_team_id_to_abbr_multi(engine: Engine, seasons: list[int]) -> dict[int, str]:
+    """Build team_id -> abbreviation mapping across multiple seasons in one query."""
+    if not seasons:
+        return {}
     p = plays_table
-    # Get distinct (game_id, home_team, away_team, possession_team_id) tuples
     stmt = (
         select(
             p.c.game_id,
@@ -1142,7 +1205,7 @@ def get_team_id_to_abbr(engine: Engine, season: int) -> dict[int, str]:
             p.c.away_team,
             p.c.possession_team_id,
         )
-        .where(p.c.season == season)
+        .where(p.c.season.in_(seasons))
         .where(p.c.possession_team_id.isnot(None))
         .where(p.c.home_team.isnot(None))
         .where(p.c.away_team.isnot(None))
@@ -1163,6 +1226,20 @@ def get_team_id_to_abbr(engine: Engine, season: int) -> dict[int, str]:
         for ptid, teams in ptid_candidates.items()
         if len(teams) == 1
     }
+
+
+def get_team_id_to_all_abbrs(engine: Engine, seasons: list[int]) -> dict[int, set[str]]:
+    """Build team_id -> set of all abbreviations across multiple seasons.
+
+    Unlike get_team_id_to_abbr_multi (which intersects globally and fails for
+    rebranded teams like CHI->OSK), this resolves per-season first, then
+    collects all abbreviations a ptid ever used.
+    """
+    result: dict[int, set[str]] = {}
+    for s in seasons:
+        for ptid, abbr in get_team_id_to_abbr(engine, s).items():
+            result.setdefault(ptid, set()).add(abbr)
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISFL Drive Chart</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a2e;
+  }
+
+  header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 2rem 2rem 1.5rem;
+    text-align: center;
+  }
+
+  header .label {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    color: #56d6d6;
+    margin-bottom: 0.5rem;
+  }
+
+  header h1 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .header-nav {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+  }
+
+  .header-nav a {
+    color: #8888aa;
+    text-decoration: none;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    transition: color 0.2s;
+  }
+  .header-nav a:hover { color: #ccc; }
+  .header-nav a.active { color: #56d6d6; }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    max-width: 1600px;
+    margin: 1.5rem auto 0.75rem;
+    padding: 0 1rem;
+  }
+
+  .controls select {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    background: #fff;
+  }
+
+  .controls label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #666;
+    margin-right: 0.25rem;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 0;
+  }
+
+  .mode-toggle button {
+    padding: 0.45rem 1rem;
+    border: 1px solid #ccc;
+    background: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: #666;
+  }
+  .mode-toggle button:first-child { border-radius: 4px 0 0 4px; }
+  .mode-toggle button:last-child { border-radius: 0 4px 4px 0; }
+  .mode-toggle button.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
+
+  .chart-container {
+    max-width: 1200px;
+    margin: 1rem auto;
+    padding: 0 1rem;
+  }
+
+  .chart-card {
+    background: #fff;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+
+  .chart-card h3 {
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+    color: #1a1a2e;
+  }
+
+  .drive-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    padding: 1rem;
+    background: #f9f9fb;
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+
+  .drive-info .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .drive-info .stat-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #888;
+    font-weight: 600;
+  }
+
+  .drive-info .stat-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #1a1a2e;
+  }
+
+  .loading {
+    text-align: center;
+    padding: 3rem;
+    color: #888;
+    font-size: 0.9rem;
+  }
+
+  footer {
+    text-align: center;
+    color: #888;
+    padding: 2rem;
+    font-size: 0.8rem;
+  }
+  footer a { color: #56d6d6; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="label">Drives</div>
+  <h1>Drive Chart</h1>
+  <div class="header-nav">
+    <a href="/static/teams.html">Teams</a>
+    <a href="/static/leaderboard.html">Players</a>
+    <a href="/static/plays.html">Plays</a>
+    <a href="/static/visualizations.html">Viz</a>
+    <a href="/static/drives.html" class="active">Drives</a>
+  </div>
+</header>
+
+<div class="controls">
+  <div class="control-group">
+    <label>Season:</label>
+    <select id="season" onchange="onSeasonChange()"></select>
+  </div>
+  <div class="control-group">
+    <div class="mode-toggle">
+      <button class="active" onclick="switchGameType('regular', this)">Regular</button>
+      <button onclick="switchGameType('playoff', this)">Playoffs</button>
+    </div>
+  </div>
+  <div class="control-group">
+    <label>Game:</label>
+    <select id="game" onchange="onGameChange()"></select>
+  </div>
+  <div class="control-group">
+    <label>Drive:</label>
+    <select id="drive" onchange="onDriveChange()"></select>
+  </div>
+</div>
+
+<div class="chart-container">
+  <div class="chart-card">
+    <h3 id="chart-title">Select a game and drive</h3>
+    <div id="chart-wrap" style="position:relative;">
+      <canvas id="driveChart"></canvas>
+    </div>
+    <div class="drive-info" id="drive-info" style="display:none;">
+      <div class="stat"><span class="stat-label">Team</span><span class="stat-value" id="info-team">-</span></div>
+      <div class="stat"><span class="stat-label">Start</span><span class="stat-value" id="info-start">-</span></div>
+      <div class="stat"><span class="stat-label">Result</span><span class="stat-value" id="info-result">-</span></div>
+      <div class="stat"><span class="stat-label">Plays</span><span class="stat-value" id="info-plays">-</span></div>
+      <div class="stat"><span class="stat-label">Yards</span><span class="stat-value" id="info-yards">-</span></div>
+      <div class="stat"><span class="stat-label">Total EPA</span><span class="stat-value" id="info-epa">-</span></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <p>ISFL EPA &mdash; <a href="/static/teams.html">Teams</a> | <a href="/static/leaderboard.html">Players</a> | <a href="/docs">API Docs</a></p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+let gameType = "regular";
+let allPlays = [];
+let drives = [];
+let driveChart = null;
+let teamMap = {}; // possession_team_id -> abbreviation
+
+// ── Helpers ──
+
+function getHalf(quarter) {
+  if (quarter <= 2) return 1;
+  if (quarter <= 4) return 2;
+  return 3;
+}
+
+function buildTeamMap(plays) {
+  // Map possession_team_id to team abbreviation.
+  // Use the first play after the opening kickoff: the receiving team starts
+  // near their own endzone, so yard_line_team identifies them reliably.
+  const home = plays.find(p => p.home_team)?.home_team;
+  const away = plays.find(p => p.away_team)?.away_team;
+  const ptids = [...new Set(plays.filter(p => p.possession_team_id).map(p => p.possession_team_id))];
+
+  const map = {};
+  // Find first non-kickoff play — receiver starts on their own side
+  const firstReal = plays.find(p => p.possession_team_id && p.yard_line_team
+      && p.play_type !== "kickoff" && p.play_type !== "quarter_marker");
+  if (firstReal && home && away && ptids.length === 2) {
+    // firstReal.yard_line_team is the side the ball is on — for the first
+    // receiving play (own ~25), this is the receiving team's abbreviation
+    map[firstReal.possession_team_id] = firstReal.yard_line_team;
+    const otherPtid = ptids.find(id => id !== firstReal.possession_team_id);
+    const otherAbbr = firstReal.yard_line_team === home ? away : home;
+    if (otherPtid != null) map[otherPtid] = otherAbbr;
+  } else if (ptids.length === 2 && home && away) {
+    // Fallback: assign by order
+    map[ptids[0]] = away;
+    map[ptids[1]] = home;
+  }
+  return map;
+}
+
+function segmentDrives(plays) {
+  const result = [];
+  let current = null;
+  let prevHalf = null;
+  for (const p of plays) {
+    const half = getHalf(p.quarter);
+    if (!current
+        || p.possession_team_id !== current.possession_team_id
+        || half !== prevHalf
+        || p.play_type === "kickoff") {
+      current = {
+        possession_team_id: p.possession_team_id,
+        startQuarter: p.quarter,
+        startClock: p.clock,
+        plays: []
+      };
+      result.push(current);
+    }
+    current.plays.push(p);
+    prevHalf = half;
+  }
+  return result;
+}
+
+function getYardline100(play, teamAbbr) {
+  if (play.yard_line == null || !play.yard_line_team || !teamAbbr) return play.yard_line;
+  // yard_line_team is the team whose side we're on
+  // If same as possession team, we're on our own side → yardline_100 = yard_line
+  // If different, we're on opponent's side → yardline_100 = 100 - yard_line
+  if (play.yard_line_team === teamAbbr) {
+    return play.yard_line;
+  }
+  return 100 - play.yard_line;
+}
+
+function epaColor(epa, alpha) {
+  if (epa == null) return `rgba(128, 128, 128, ${alpha})`;
+  if (epa >= 0) return `rgba(34, 139, 34, ${alpha})`; // forest green
+  return `rgba(220, 53, 69, ${alpha})`;                 // red
+}
+
+function epaAlpha(epa) {
+  if (epa == null) return 0.5;
+  const maxEpa = 3.0;
+  return 0.4 + Math.min(Math.abs(epa), maxEpa) / maxEpa * 0.5;
+}
+
+function fieldLabel(val) {
+  if (val === 50) return "50";
+  if (val < 50) return "Own " + val;
+  return "Opp " + (100 - val);
+}
+
+function driveResult(drive) {
+  const last = drive.plays[drive.plays.length - 1];
+  if (last.touchdown) return "TD";
+  if (last.fg_good === true) return "FG";
+  if (last.interception) return "INT";
+  if (last.fumble_lost) return "FUM";
+  if (last.safety) return "Safety";
+  // Check if last play is a field goal attempt that missed
+  if (last.play_type === "field_goal" && last.fg_good === false) return "Missed FG";
+  // Check for turnover on downs (4th down, no first down)
+  if (last.down === 4 && !last.first_down && !last.touchdown) return "Turnover on Downs";
+  // If next drive is different team and half didn't change, likely punt
+  return "Punt / End";
+}
+
+// ── Data Loading ──
+
+async function loadSeasons() {
+  const resp = await fetch(`/epa/seasons?game_type=${gameType}`);
+  const seasons = await resp.json();
+  const sel = document.getElementById("season");
+  sel.innerHTML = seasons.map(s => `<option value="${s}">${s}</option>`).join("");
+  if (seasons.length) onSeasonChange();
+}
+
+async function onSeasonChange() {
+  const season = document.getElementById("season").value;
+  if (!season) return;
+  const resp = await fetch(`/epa/games?season=${season}&game_type=${gameType}`);
+  const games = await resp.json();
+  const sel = document.getElementById("game");
+  sel.innerHTML = '<option value="">-- Select Game --</option>' +
+    games.map(g => `<option value="${g.game_id}">${g.away_team} @ ${g.home_team} (${g.away_score}-${g.home_score})</option>`).join("");
+  document.getElementById("drive").innerHTML = '<option value="">--</option>';
+  clearChart();
+}
+
+async function onGameChange() {
+  const gameId = document.getElementById("game").value;
+  if (!gameId) { clearChart(); return; }
+  const resp = await fetch(`/epa/game/${gameId}`);
+  allPlays = await resp.json();
+  teamMap = buildTeamMap(allPlays);
+  drives = segmentDrives(allPlays);
+
+  const sel = document.getElementById("drive");
+  sel.innerHTML = drives.map((d, i) => {
+    const teamAbbr = teamMap[d.possession_team_id] || `Team ${d.possession_team_id}`;
+    const scrimmage = d.plays.filter(p => ["pass","rush","sack","field_goal"].includes(p.play_type));
+    const qLabel = d.startQuarter ? `Q${d.startQuarter}` : "";
+    const clockLabel = d.startClock || "";
+    return `<option value="${i}">Drive ${i + 1}: ${teamAbbr} (${qLabel} ${clockLabel}) - ${scrimmage.length} plays</option>`;
+  }).join("");
+
+  if (drives.length) {
+    sel.value = "0";
+    onDriveChange();
+  }
+}
+
+function onDriveChange() {
+  const idx = parseInt(document.getElementById("drive").value, 10);
+  if (isNaN(idx) || !drives[idx]) { clearChart(); return; }
+  renderDrive(drives[idx], idx);
+}
+
+function switchGameType(type, btn) {
+  gameType = type;
+  document.querySelectorAll(".mode-toggle button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  loadSeasons();
+}
+
+// ── Chart Rendering ──
+
+function clearChart() {
+  if (driveChart) { driveChart.destroy(); driveChart = null; }
+  document.getElementById("chart-title").textContent = "Select a game and drive";
+  document.getElementById("drive-info").style.display = "none";
+}
+
+function renderDrive(drive, driveIdx) {
+  const teamAbbr = teamMap[drive.possession_team_id] || `Team ${drive.possession_team_id}`;
+  const scrimmage = drive.plays.filter(p => ["pass","rush","sack","field_goal","penalty"].includes(p.play_type));
+
+  if (!scrimmage.length) {
+    clearChart();
+    document.getElementById("chart-title").textContent = `Drive ${driveIdx + 1}: ${teamAbbr} - No plays`;
+    return;
+  }
+
+  const labels = [];
+  const barData = [];
+  const bgColors = [];
+  const borderColors = [];
+  const playDetails = [];
+
+  // Pre-compute all start positions so each bar ends where the next begins
+  const starts = scrimmage.map(p => {
+    const yl100 = getYardline100(p, teamAbbr);
+    return yl100 != null ? yl100 : 0;
+  });
+
+  for (let i = 0; i < scrimmage.length; i++) {
+    const p = scrimmage[i];
+    let start = Math.max(0, Math.min(100, starts[i]));
+    let end;
+    if (i + 1 < scrimmage.length) {
+      // Use next play's start position → contiguous bars
+      end = Math.max(0, Math.min(100, starts[i + 1]));
+    } else {
+      // Last play: fall back to yards_gained
+      const yg = p.yards_gained != null ? p.yards_gained : 0;
+      end = Math.max(0, Math.min(100, start + yg));
+    }
+
+    // For zero-gain, give minimal width for visibility
+    if (start === end) {
+      end = Math.min(100, start + 0.5);
+    }
+
+    const isPenalty = p.play_type === "penalty";
+    const downDist = p.down ? `${p.down}&${p.distance || "?"}` : "?";
+    let typeLabel;
+    if (isPenalty) {
+      typeLabel = p.penalty_type ? `PEN: ${p.penalty_type}` : "penalty";
+    } else {
+      typeLabel = p.play_type === "field_goal" ? "FG" : p.play_type;
+    }
+    labels.push(`${downDist} ${typeLabel}`);
+    barData.push([start, end]);
+
+    if (isPenalty) {
+      bgColors.push("rgba(255, 193, 7, 0.6)");
+      borderColors.push("rgba(255, 193, 7, 0.9)");
+    } else {
+      const alpha = epaAlpha(p.epa);
+      bgColors.push(epaColor(p.epa, alpha));
+      borderColors.push(epaColor(p.epa, 0.9));
+    }
+    playDetails.push(p);
+  }
+
+  const canvas = document.getElementById("driveChart");
+  const chartHeight = Math.max(200, scrimmage.length * 40);
+  canvas.parentElement.style.height = chartHeight + "px";
+
+  if (driveChart) driveChart.destroy();
+
+  driveChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [{
+        data: barData,
+        backgroundColor: bgColors,
+        borderColor: borderColors,
+        borderWidth: 1,
+        borderSkipped: false,
+        barPercentage: 0.75,
+        categoryPercentage: 0.85
+      }]
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => {
+              const i = items[0].dataIndex;
+              const p = playDetails[i];
+              return p.description || "";
+            },
+            label: (item) => {
+              const i = item.dataIndex;
+              const p = playDetails[i];
+              const lines = [];
+              if (p.play_type === "penalty") {
+                if (p.penalty_type) lines.push(`Penalty: ${p.penalty_type}`);
+                if (p.penalty_team) lines.push(`On: ${p.penalty_team}`);
+              } else {
+                if (p.down) lines.push(`${p.down}${ordSuffix(p.down)} & ${p.distance || "?"}`);
+                lines.push(`Yards: ${p.yards_gained != null ? p.yards_gained : "N/A"}`);
+                if (p.epa != null) {
+                  lines.push(`EPA: ${p.epa >= 0 ? "+" : ""}${p.epa.toFixed(2)}`);
+                  lines.push(`EP: ${p.ep_before?.toFixed(2) || "?"} \u2192 ${p.ep_after?.toFixed(2) || "?"}`);
+                } else {
+                  lines.push("EPA: N/A");
+                }
+              }
+              return lines;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          min: 0,
+          max: 100,
+          title: { display: true, text: "Field Position", font: { weight: "bold" } },
+          ticks: {
+            stepSize: 10,
+            callback: (val) => fieldLabel(val)
+          },
+          grid: { color: "rgba(0,0,0,0.06)" }
+        },
+        y: {
+          title: { display: false },
+          grid: { display: false }
+        }
+      }
+    }
+  });
+
+  // Update info panel
+  document.getElementById("chart-title").textContent = `Drive ${driveIdx + 1}: ${teamAbbr}`;
+  const info = document.getElementById("drive-info");
+  info.style.display = "flex";
+
+  document.getElementById("info-team").textContent = teamAbbr;
+
+  const startYl = getYardline100(scrimmage[0], teamAbbr);
+  document.getElementById("info-start").textContent = startYl != null ? fieldLabel(startYl) : "?";
+  document.getElementById("info-result").textContent = driveResult(drive);
+  document.getElementById("info-plays").textContent = scrimmage.length;
+
+  const totalYards = scrimmage.reduce((s, p) => s + (p.yards_gained || 0), 0);
+  document.getElementById("info-yards").textContent = totalYards;
+
+  const totalEpa = scrimmage.reduce((s, p) => s + (p.epa || 0), 0);
+  const epaEl = document.getElementById("info-epa");
+  epaEl.textContent = (totalEpa >= 0 ? "+" : "") + totalEpa.toFixed(2);
+  epaEl.style.color = totalEpa >= 0 ? "#228b22" : "#dc3545";
+}
+
+function ordSuffix(n) {
+  if (n === 1) return "st";
+  if (n === 2) return "nd";
+  if (n === 3) return "rd";
+  return "th";
+}
+
+// ── Init ──
+loadSeasons();
+</script>
+</body>
+</html>

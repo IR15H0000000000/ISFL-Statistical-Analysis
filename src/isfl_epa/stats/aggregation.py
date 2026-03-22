@@ -157,27 +157,60 @@ def game_player_defensive(game: Game, registry=None) -> list[PlayerDefensive]:
         "tackles": 0, "sacks": 0.0, "interceptions": 0, "fumble_recoveries": 0,
         "forced_fumbles": 0,
     })
+    # Track which team each defender is on (non-possession team)
+    defender_team: dict[str, str | None] = {}
+
+    # Build per-game team pair for defensive team lookup
+    home = game.home_team
+    away = game.away_team
+    _home_id = game.home_team_id
+    _away_id = game.away_team_id
+
+    def _def_team(play: ParsedPlay) -> str | None:
+        """Return the abbreviation of the defensive team for a play."""
+        if not home or not away:
+            return None
+        pid = getattr(play, "possession_team_id", None)
+        if pid == _home_id:
+            return away
+        if pid == _away_id:
+            return home
+        return None
 
     for p in game.plays:
         if p.tackler:
             stats[p.tackler]["tackles"] += 1
+            if p.tackler not in defender_team:
+                defender_team[p.tackler] = _def_team(p)
         if p.sacker:
             stats[p.sacker]["sacks"] += 1.0
+            if p.sacker not in defender_team:
+                defender_team[p.sacker] = _def_team(p)
         if p.interceptor:
             stats[p.interceptor]["interceptions"] += 1
+            if p.interceptor not in defender_team:
+                defender_team[p.interceptor] = _def_team(p)
         if p.fumble_recoverer:
             stats[p.fumble_recoverer]["fumble_recoveries"] += 1
-        if p.fumble and p.tackler:
-            stats[p.tackler]["forced_fumbles"] += 1
+            if p.fumble_recoverer not in defender_team:
+                defender_team[p.fumble_recoverer] = _def_team(p)
+        if p.fumble:
+            ff_player = p.tackler or p.sacker
+            if ff_player:
+                stats[ff_player]["forced_fumbles"] += 1
 
     result = []
     for player, s in stats.items():
-        # Defensive players are on the non-possession team, but we don't
-        # easily know that per-play. Use None for now; the registry can
-        # resolve team from other appearances.
-        pid = _resolve_player_id(registry, player, game.season, None)
+        team = defender_team.get(player)
+        # Try defensive alias resolution to disambiguate abbreviated names
+        # like "Strong, W." which map to different real players
+        pid = None
+        if registry:
+            pid = registry.resolve_defensive(player, game.season)
+        if pid is None:
+            pid = _resolve_player_id(registry, player, game.season, team)
         result.append(PlayerDefensive(
-            player_id=pid, player=player, team=None,
+            player_id=pid, player=player, team=team,
             game_id=game.id, season=game.season, **s,
         ))
     return result
@@ -247,7 +280,7 @@ def game_team_stats(game: Game) -> list[TeamGame]:
                 t[opp]["sacks_made"] += 1
 
         if p.fumble:
-            if p.tackler and opp in t:
+            if (p.tackler or p.sacker) and opp in t:
                 t[opp]["forced_fumbles"] += 1
             if p.fumble_lost:
                 s["fumbles_lost"] += 1

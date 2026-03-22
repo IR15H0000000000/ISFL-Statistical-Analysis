@@ -206,6 +206,10 @@ def _ep_after_drive_arr(
         if halves[npos] != current_half:
             return 0.0
 
+        # Kickoff → drive ended (handles onside kicks)
+        if play_types[npos] == "kickoff":
+            return 0.0
+
         poss_next = poss_tid[npos]
 
         # Possession changed → drive ended without scoring

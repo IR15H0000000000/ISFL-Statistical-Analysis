@@ -3,15 +3,31 @@
 import time
 
 from fastapi import APIRouter, Query, Request
-from sqlalchemy import Integer, case, cast, desc, func, literal_column, or_, select, Float
+from sqlalchemy import Integer, and_, case, cast, desc, distinct, exists, func, literal_column, or_, select, Float
 
 # Server-side cache: (season, side, game_type) -> (timestamp, data)
 _dashboard_cache: dict[tuple, tuple[float, list[dict]]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
+# Visualization cache: (endpoint, season_min, season_max, game_type) -> (timestamp, data)
+_viz_cache: dict[tuple, tuple[float, object]] = {}
+_VIZ_CACHE_TTL = 300  # 5 minutes
+
+
+def _viz_cached(key: tuple, compute_fn):
+    """Return cached result or compute and cache it."""
+    cached = _viz_cache.get(key)
+    if cached and time.time() - cached[0] < _VIZ_CACHE_TTL:
+        return cached[1]
+    result = compute_fn()
+    _viz_cache[key] = (time.time(), result)
+    return result
+
 from isfl_epa.storage.database import (
     games_table,
     get_team_id_to_abbr,
+    get_team_id_to_abbr_multi,
+    get_team_id_to_all_abbrs,
     play_epa_table,
     player_game_defensive_table,
     player_game_passing_table,
@@ -25,6 +41,65 @@ from isfl_epa.storage.database import (
 )
 
 router = APIRouter()
+
+
+def _league_avg_epa(conn, season: int, game_type: str, play_types: list[str]) -> float | None:
+    """League-average EPA per play for the given play types in a season."""
+    stmt = (
+        select(func.avg(play_epa_table.c.epa))
+        .join(plays_table, plays_table.c.id == play_epa_table.c.play_id)
+        .where(plays_table.c.season == season)
+        .where(plays_table.c.game_type == game_type)
+        .where(plays_table.c.play_type.in_(play_types))
+        .where(play_epa_table.c.epa.isnot(None))
+    )
+    result = conn.execute(stmt).scalar()
+    return float(result) if result is not None else None
+
+
+def _league_avg_team_epa(conn, season: int, game_type: str, side: str) -> float | None:
+    """League-average EPA/play across all teams for the given side."""
+    t = team_season_epa_table
+    stmt = select(
+        func.sum(t.c.total_epa) / func.nullif(func.sum(t.c.plays), 0)
+    ).where(t.c.season == season).where(t.c.game_type == game_type).where(t.c.side == side)
+    result = conn.execute(stmt).scalar()
+    return float(result) if result is not None else None
+
+
+def _add_epa_plus(rows: list[dict], avg: float | None, epa_per_key: str) -> None:
+    """Mutate rows in-place to add epa_plus column."""
+    for row in rows:
+        epa_per = row.get(epa_per_key)
+        row["epa_plus"] = round((epa_per - avg) * 100, 1) if (epa_per is not None and avg is not None) else None
+
+
+def _league_avg_epa_by_position(conn, season: int, game_type: str, epa_col: str, plays_col: str) -> dict[str, float]:
+    """Weighted avg EPA/play by position for a season.
+    Returns dict {position: avg_epa_per_play}."""
+    epa_t = player_season_epa_table
+    pp = player_positions_table
+    stmt = (
+        select(
+            pp.c.position,
+            (func.sum(epa_t.c[epa_col]) / func.nullif(func.sum(epa_t.c[plays_col]), 0)).label("avg_epa"),
+        )
+        .join(pp, (epa_t.c.player_id == pp.c.player_id) & (epa_t.c.season == pp.c.season))
+        .where(epa_t.c.season == season)
+        .where(epa_t.c.game_type == game_type)
+        .where(epa_t.c[plays_col] > 0)
+        .group_by(pp.c.position)
+    )
+    return {row.position: float(row.avg_epa) for row in conn.execute(stmt) if row.avg_epa is not None}
+
+
+def _add_epa_plus_by_position(rows: list[dict], avg_by_pos: dict[str, float], epa_per_key: str, fallback_avg: float | None = None) -> None:
+    """Mutate rows in-place: epa_plus uses position-specific baseline."""
+    for row in rows:
+        epa_per = row.get(epa_per_key)
+        pos = row.get("position", "")
+        avg = avg_by_pos.get(pos, fallback_avg)
+        row["epa_plus"] = round((epa_per - avg) * 100, 1) if (epa_per is not None and avg is not None) else None
 
 
 @router.get("/passing-leaders")
@@ -47,7 +122,10 @@ def epa_passing_leaders(
         .limit(top)
     )
     with engine.connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(stmt)]
+        rows = [dict(row._mapping) for row in conn.execute(stmt)]
+        avg = _league_avg_epa(conn, season, game_type, ["pass", "sack"])
+        _add_epa_plus(rows, avg, "epa_per_dropback")
+        return rows
 
 
 @router.get("/rushing-leaders")
@@ -70,7 +148,10 @@ def epa_rushing_leaders(
         .limit(top)
     )
     with engine.connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(stmt)]
+        rows = [dict(row._mapping) for row in conn.execute(stmt)]
+        avg = _league_avg_epa(conn, season, game_type, ["rush"])
+        _add_epa_plus(rows, avg, "epa_per_rush")
+        return rows
 
 
 @router.get("/receiving-leaders")
@@ -93,7 +174,10 @@ def epa_receiving_leaders(
         .limit(top)
     )
     with engine.connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(stmt)]
+        rows = [dict(row._mapping) for row in conn.execute(stmt)]
+        avg = _league_avg_epa(conn, season, game_type, ["pass"])
+        _add_epa_plus(rows, avg, "epa_per_target")
+        return rows
 
 
 @router.get("/defensive-leaders")
@@ -116,7 +200,10 @@ def epa_defensive_leaders(
         .limit(top)
     )
     with engine.connect() as conn:
-        return [dict(row._mapping) for row in conn.execute(stmt)]
+        rows = [dict(row._mapping) for row in conn.execute(stmt)]
+        avg = _league_avg_epa(conn, season, game_type, ["pass", "rush", "sack"])
+        _add_epa_plus(rows, avg, "epa_per_def_play")
+        return rows
 
 
 @router.get("/team")
@@ -172,9 +259,25 @@ def game_epa(
             plays_table.c.play_type,
             plays_table.c.description,
             plays_table.c.possession_team_id,
+            plays_table.c.down,
+            plays_table.c.distance,
+            plays_table.c.yard_line,
+            plays_table.c.yard_line_team,
+            plays_table.c.yards_gained,
+            plays_table.c.home_team,
+            plays_table.c.away_team,
+            plays_table.c.touchdown,
+            plays_table.c.interception,
+            plays_table.c.fumble_lost,
+            plays_table.c.safety,
+            plays_table.c.first_down,
+            plays_table.c.fg_good,
             plays_table.c.passer,
             plays_table.c.rusher,
             plays_table.c.receiver,
+            plays_table.c.penalty,
+            plays_table.c.penalty_team,
+            plays_table.c.penalty_type,
             play_epa_table.c.ep_before,
             play_epa_table.c.ep_after,
             play_epa_table.c.epa,
@@ -182,6 +285,59 @@ def game_epa(
         .join(play_epa_table, plays_table.c.id == play_epa_table.c.play_id, isouter=True)
         .where(plays_table.c.game_id == game_id)
         .order_by(plays_table.c.play_index)
+    )
+    with engine.connect() as conn:
+        return [dict(row._mapping) for row in conn.execute(stmt)]
+
+
+@router.get("/games")
+def list_games(
+    request: Request,
+    season: int = Query(...),
+    game_type: str = Query(default="regular"),
+):
+    """List games for a season with team names and scores."""
+    engine = request.app.state.engine
+    home = (
+        select(
+            team_games_table.c.game_id,
+            team_games_table.c.team.label("home_team"),
+            team_games_table.c.points_for.label("home_score"),
+        )
+        .where(
+            and_(
+                team_games_table.c.season == season,
+                team_games_table.c.game_type == game_type,
+                team_games_table.c.is_home == True,  # noqa: E712
+            )
+        )
+        .subquery("home")
+    )
+    away = (
+        select(
+            team_games_table.c.game_id,
+            team_games_table.c.team.label("away_team"),
+            team_games_table.c.points_for.label("away_score"),
+        )
+        .where(
+            and_(
+                team_games_table.c.season == season,
+                team_games_table.c.game_type == game_type,
+                team_games_table.c.is_home == False,  # noqa: E712
+            )
+        )
+        .subquery("away")
+    )
+    stmt = (
+        select(
+            home.c.game_id,
+            home.c.home_team,
+            away.c.away_team,
+            home.c.home_score,
+            away.c.away_score,
+        )
+        .join(away, home.c.game_id == away.c.game_id)
+        .order_by(home.c.game_id)
     )
     with engine.connect() as conn:
         return [dict(row._mapping) for row in conn.execute(stmt)]
@@ -213,19 +369,12 @@ def available_seasons(
 
 
 def _success_check():
-    """SQL CASE expression for PFR-style success rate.
+    """SQL expression for EPA-based success rate.
 
-    1st down: yards_gained >= 0.4 * distance
-    2nd down: yards_gained >= 0.6 * distance
-    3rd/4th down: yards_gained >= distance
+    A play is successful if EPA > 0.
+    Requires play_epa table to be joined in the query.
     """
-    p = plays_table
-    return case(
-        (p.c.down == 1, p.c.yards_gained >= cast(p.c.distance * 0.4, Float)),
-        (p.c.down == 2, p.c.yards_gained >= cast(p.c.distance * 0.6, Float)),
-        (p.c.down >= 3, p.c.yards_gained >= p.c.distance),
-        else_=False,
-    )
+    return play_epa_table.c.epa > 0
 
 
 @router.get("/team-dashboard")
@@ -283,6 +432,9 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
     with engine.connect() as conn:
         # 1. Precomputed EPA + success rate from team_season_epa
         epa_rows = _read_team_epa(conn, season, game_type, side="offensive")
+        def_epa_rows = _read_team_epa(conn, season, game_type, side="defensive")
+        league_avg_off = _league_avg_team_epa(conn, season, game_type, "offensive")
+        league_avg_def = _league_avg_team_epa(conn, season, game_type, "defensive")
 
         # 2. Traditional stats from team_games
         tg = team_games_table
@@ -311,6 +463,18 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
         )
         trad_rows = {row.team: row._mapping for row in conn.execute(trad_stmt)}
 
+        # 3. Opponent fumbles_lost grouped by opponent = this team's defensive recoveries
+        opp_fl_stmt = (
+            select(
+                tg.c.opponent.label("team"),
+                func.sum(tg.c.fumbles_lost).label("opp_fumbles_lost"),
+            )
+            .where(tg.c.season == season)
+            .where(tg.c.game_type == game_type)
+            .group_by(tg.c.opponent)
+        )
+        opp_fl = {row.team: row.opp_fumbles_lost or 0 for row in conn.execute(opp_fl_stmt)}
+
         # Merge everything
         results = []
         all_teams = set(epa_rows.keys()) | set(trad_rows.keys())
@@ -325,6 +489,17 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
             wins = trad.get("wins") or 0
             losses = trad.get("losses") or 0
             ties = trad.get("ties") or 0
+            fl = trad.get("fumbles_lost") or 0
+            mixed_fr = trad.get("fumble_recoveries") or 0
+            def_fr = opp_fl.get(team, 0)
+            off_fr = max(mixed_fr - def_fr, 0)
+            fumbles_total = fl + off_fr
+
+            off_epa_per = epa.get("epa_per_play", 0)
+            off_epa_plus = round((off_epa_per - league_avg_off) * 100, 1) if league_avg_off is not None else None
+            def_epa_per = def_epa_rows.get(team, {}).get("epa_per_play")
+            def_epa_plus = round((def_epa_per - league_avg_def) * 100, 1) if (def_epa_per is not None and league_avg_def is not None) else None
+            net_epa_plus = round(off_epa_plus - def_epa_plus, 1) if (off_epa_plus is not None and def_epa_plus is not None) else None
 
             results.append({
                 "team": team,
@@ -333,8 +508,10 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 "losses": losses,
                 "ties": ties,
                 "points_for": trad.get("points_for") or 0,
-                "epa_per_play": round(epa.get("epa_per_play", 0), 3),
+                "epa_per_play": round(off_epa_per, 3),
                 "total_epa": round(epa.get("total_epa", 0), 2),
+                "off_epa_plus": off_epa_plus,
+                "net_epa_plus": net_epa_plus,
                 "success_pct": round(epa.get("success_rate", 0) * 100, 1),
                 "epa_per_pass": round(epa.get("pass_epa", 0) / dropbacks, 3) if dropbacks else 0,
                 "epa_per_rush": round(epa.get("rush_epa", 0) / rush_att, 3) if rush_att else 0,
@@ -345,8 +522,10 @@ def _offensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 "rush_td": trad.get("rush_td") or 0,
                 "sack_pct": round(sacks_taken / dropbacks * 100, 1) if dropbacks else 0,
                 "int_pct": round(ints_thrown / pass_att * 100, 1) if pass_att else 0,
-                "fumbles_lost": trad.get("fumbles_lost") or 0,
-                "fumble_recoveries": trad.get("fumble_recoveries") or 0,
+                "fumbles_lost": fl,
+                "off_fumble_recoveries": off_fr,
+                "fumbles_total": fumbles_total,
+                "fumble_lost_pct": round(fl / fumbles_total * 100, 1) if fumbles_total else 0,
             })
 
         results.sort(key=lambda r: r["epa_per_play"], reverse=True)
@@ -360,6 +539,7 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
     with engine.connect() as conn:
         # 1. Precomputed defensive EPA + success rate
         def_epa = _read_team_epa(conn, season, game_type, side="defensive")
+        league_avg_def = _league_avg_team_epa(conn, season, game_type, "defensive")
 
         # 2. Defensive traditional stats: what opponents did against each team
         tg = team_games_table
@@ -375,6 +555,7 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 func.sum(tg.c.rush_td).label("rush_td"),
                 func.sum(tg.c.sacks_taken).label("sacks_taken"),
                 func.sum(tg.c.interceptions_thrown).label("ints_thrown"),
+                func.sum(tg.c.fumbles_lost).label("opp_fumbles_lost"),
             )
             .where(tg.c.season == season)
             .where(tg.c.game_type == game_type)
@@ -388,7 +569,6 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 tg.c.team,
                 func.sum(tg.c.sacks_made).label("sacks_made"),
                 func.sum(tg.c.forced_fumbles).label("forced_fumbles"),
-                func.sum(tg.c.fumble_recoveries).label("fumble_recoveries"),
                 func.sum(tg.c.points_against).label("points_against"),
                 func.sum(case((tg.c.points_for > tg.c.points_against, 1), else_=0)).label("wins"),
                 func.sum(case((tg.c.points_for < tg.c.points_against, 1), else_=0)).label("losses"),
@@ -416,6 +596,11 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
             wins = own.get("wins") or 0
             losses = own.get("losses") or 0
             ties = own.get("ties") or 0
+            ff = own.get("forced_fumbles") or 0
+            def_fr = trad.get("opp_fumbles_lost") or 0
+
+            def_epa_per = epa_data.get("epa_per_play", 0)
+            def_epa_plus = round((def_epa_per - league_avg_def) * 100, 1) if league_avg_def is not None else None
 
             results.append({
                 "team": team,
@@ -424,8 +609,9 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 "losses": losses,
                 "ties": ties,
                 "points_against": own.get("points_against") or 0,
-                "epa_per_play": round(epa_data.get("epa_per_play", 0), 3),
+                "epa_per_play": round(def_epa_per, 3),
                 "total_epa": round(epa_data.get("total_epa", 0), 2),
+                "def_epa_plus": def_epa_plus,
                 "success_pct": round(epa_data.get("success_rate", 0) * 100, 1),
                 "epa_per_pass": round(epa_data.get("pass_epa", 0) / opp_dropbacks, 3) if opp_dropbacks else 0,
                 "epa_per_rush": round(epa_data.get("rush_epa", 0) / opp_rush_att, 3) if opp_rush_att else 0,
@@ -436,8 +622,9 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 "rush_td": trad.get("rush_td") or 0,
                 "sack_pct": round(sacks_made / opp_dropbacks * 100, 1) if opp_dropbacks else 0,
                 "int_pct": round(opp_ints / opp_pass_att * 100, 1) if opp_pass_att else 0,
-                "forced_fumbles": own.get("forced_fumbles") or 0,
-                "fumble_recoveries": own.get("fumble_recoveries") or 0,
+                "forced_fumbles": ff,
+                "def_fumble_recoveries": def_fr,
+                "fumble_recovery_pct": round(def_fr / ff * 100, 1) if ff else 0,
             })
 
         # For defense, lower EPA is better — sort ascending
@@ -474,8 +661,9 @@ def _resolve_possession_team(conn, season: int):
 
 
 def _compute_success_rate(conn, season: int, offensive: bool = True, game_type: str = "regular") -> dict[str, float]:
-    """Compute PFR-style success rate per team.
+    """Compute EPA-based success rate per team.
 
+    A play is successful if EPA > 0.
     If offensive=True, groups by possession team (how successful is the offense).
     If offensive=False, groups by defending team (how successful are opponents).
     """
@@ -487,21 +675,18 @@ def _compute_success_rate(conn, season: int, offensive: bool = True, game_type: 
     e = play_epa_table
     scrimmage_types = ["pass", "rush", "sack"]
 
-    # Fetch all scrimmage plays with down/distance/yards
+    # Fetch all scrimmage plays with EPA values
     stmt = (
         select(
             p.c.game_id,
             p.c.possession_team_id,
-            p.c.down,
-            p.c.distance,
-            p.c.yards_gained,
+            e.c.epa,
         )
+        .select_from(p.join(e, p.c.id == e.c.play_id))
         .where(p.c.season == season)
         .where(p.c.game_type == game_type)
         .where(p.c.play_type.in_(scrimmage_types))
-        .where(p.c.down.isnot(None))
-        .where(p.c.distance.isnot(None))
-        .where(p.c.yards_gained.isnot(None))
+        .where(e.c.epa.isnot(None))
     )
 
     # Compute success per team
@@ -513,7 +698,6 @@ def _compute_success_rate(conn, season: int, offensive: bool = True, game_type: 
             continue
 
         # Determine the defending team for defensive view
-        # Find the other team in this game
         if not offensive:
             game_teams = [
                 t for (gid, tid), t in mapping.items()
@@ -525,19 +709,8 @@ def _compute_success_rate(conn, season: int, offensive: bool = True, game_type: 
         else:
             team = poss_team
 
-        # PFR success: 1st → 40%, 2nd → 60%, 3rd/4th → 100%
-        down = row.down
-        distance = row.distance
-        yards = row.yards_gained or 0
-        if down == 1:
-            success = yards >= distance * 0.4
-        elif down == 2:
-            success = yards >= distance * 0.6
-        else:
-            success = yards >= distance
-
         team_total[team] = team_total.get(team, 0) + 1
-        if success:
+        if row.epa > 0:
             team_success[team] = team_success.get(team, 0) + 1
 
     return {
@@ -628,21 +801,41 @@ def player_leaderboard(
 
     with engine.connect() as conn:
         if category == "passing":
-            return _leaderboard_passing(conn, mode, season_list if mode == "season" else None,
+            rows = _leaderboard_passing(conn, mode, season_list if mode == "season" else None,
                                         season_range if mode != "season" else None,
                                         position, team, min_plays or 100, limit, game_type)
+            if mode == "season" and season is not None:
+                avg_by_pos = _league_avg_epa_by_position(conn, season, game_type, "pass_epa", "dropbacks")
+                fallback = _league_avg_epa(conn, season, game_type, ["pass", "sack"])
+                _add_epa_plus_by_position(rows, avg_by_pos, "epa_per_dropback", fallback)
+            return rows
         elif category == "rushing":
-            return _leaderboard_rushing(conn, mode, season_list if mode == "season" else None,
+            rows = _leaderboard_rushing(conn, mode, season_list if mode == "season" else None,
                                         season_range if mode != "season" else None,
                                         position, team, min_plays or 50, limit, game_type)
+            if mode == "season" and season is not None:
+                avg_by_pos = _league_avg_epa_by_position(conn, season, game_type, "rush_epa", "rush_attempts")
+                fallback = _league_avg_epa(conn, season, game_type, ["rush"])
+                _add_epa_plus_by_position(rows, avg_by_pos, "epa_per_rush", fallback)
+            return rows
         elif category == "receiving":
-            return _leaderboard_receiving(conn, mode, season_list if mode == "season" else None,
+            rows = _leaderboard_receiving(conn, mode, season_list if mode == "season" else None,
                                           season_range if mode != "season" else None,
                                           position, team, min_plays or 30, limit, game_type)
+            if mode == "season" and season is not None:
+                avg_by_pos = _league_avg_epa_by_position(conn, season, game_type, "recv_epa", "targets")
+                fallback = _league_avg_epa(conn, season, game_type, ["pass"])
+                _add_epa_plus_by_position(rows, avg_by_pos, "epa_per_target", fallback)
+            return rows
         elif category == "defense":
-            return _leaderboard_defense(conn, mode, season_list if mode == "season" else None,
+            rows = _leaderboard_defense(conn, mode, season_list if mode == "season" else None,
                                         season_range if mode != "season" else None,
                                         position, team, min_plays or 50, limit, game_type)
+            if mode == "season" and season is not None:
+                avg_by_pos = _league_avg_epa_by_position(conn, season, game_type, "def_epa", "def_plays")
+                fallback = _league_avg_epa(conn, season, game_type, ["pass", "rush", "sack"])
+                _add_epa_plus_by_position(rows, avg_by_pos, "epa_per_def_play", fallback)
+            return rows
         return []
 
 
@@ -1526,46 +1719,118 @@ def viz_ep_by_distance(
 ):
     """Average EP by distance to first down, split by down number."""
     engine = request.app.state.engine
-    p = plays_table
-    pe = play_epa_table
-
     eff_min = season_min or 1
     eff_max = season_max or 999
+    cache_key = ("ep-by-distance", eff_min, eff_max, game_type)
 
-    stmt = (
-        select(
-            p.c.distance,
-            p.c.down,
-            func.avg(pe.c.ep_before).label("avg_ep"),
-            func.count().label("count"),
+    def _compute():
+        p = plays_table
+        pe = play_epa_table
+
+        stmt = (
+            select(
+                p.c.distance,
+                p.c.down,
+                func.avg(pe.c.ep_before).label("avg_ep"),
+                func.count().label("count"),
+            )
+            .select_from(p)
+            .join(pe, pe.c.play_id == p.c.id)
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
+            .where(p.c.down.in_([1, 2, 3, 4]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.distance.isnot(None))
+            .where(p.c.distance >= 1)
+            .where(p.c.distance <= 30)
+            .where(pe.c.ep_before.isnot(None))
+            .group_by(p.c.distance, p.c.down)
+            .having(func.count() >= 100)
+            .order_by(p.c.distance)
         )
-        .select_from(p)
-        .join(pe, pe.c.play_id == p.c.id)
-        .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
-        .where(p.c.down.in_([1, 2, 3, 4]))
-        .where(p.c.game_type == game_type)
-        .where(p.c.season.between(eff_min, eff_max))
-        .where(p.c.distance.isnot(None))
-        .where(p.c.distance >= 1)
-        .where(p.c.distance <= 30)
-        .where(pe.c.ep_before.isnot(None))
-        .group_by(p.c.distance, p.c.down)
-        .having(func.count() >= 100)
-        .order_by(p.c.distance)
-    )
 
-    with engine.connect() as conn:
-        rows = conn.execute(stmt).fetchall()
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
 
-    return [
-        {
-            "distance": row.distance,
-            "down": row.down,
-            "avg_ep": round(float(row.avg_ep), 4),
-            "count": row.count,
-        }
-        for row in rows
-    ]
+        return [
+            {
+                "distance": row.distance,
+                "down": row.down,
+                "avg_ep": round(float(row.avg_ep), 4),
+                "count": row.count,
+            }
+            for row in rows
+        ]
+
+    return _viz_cached(cache_key, _compute)
+
+
+@router.get("/viz/epa-by-down-distance")
+def viz_epa_by_down_distance(
+    request: Request,
+    season_min: int = Query(default=None),
+    season_max: int = Query(default=None),
+    game_type: str = Query(default="regular"),
+):
+    """Success rate by down and distance bucket, split by pass vs rush."""
+    engine = request.app.state.engine
+    eff_min = season_min or 1
+    eff_max = season_max or 999
+    cache_key = ("epa-by-down-distance", eff_min, eff_max, game_type)
+
+    def _compute():
+        p = plays_table
+
+        distance_bucket = case(
+            (p.c.distance <= 3, literal_column("'Short'")),
+            (p.c.distance <= 7, literal_column("'Medium'")),
+            (p.c.distance <= 12, literal_column("'Long'")),
+            else_=literal_column("'Very Long'"),
+        ).label("distance_bucket")
+
+        play_type_col = case(
+            (p.c.play_type == "sack", literal_column("'pass'")),
+            else_=p.c.play_type,
+        ).label("play_type")
+
+        e = play_epa_table
+        success_expr = _success_check()
+
+        stmt = (
+            select(
+                p.c.down,
+                distance_bucket,
+                play_type_col,
+                func.avg(cast(cast(success_expr, Integer), Float)).label("success_rate"),
+                func.count().label("count"),
+            )
+            .select_from(p.join(e, p.c.id == e.c.play_id))
+            .where(p.c.play_type.in_(["pass", "rush", "sack"]))
+            .where(p.c.down.in_([1, 2, 3, 4]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.distance.isnot(None))
+            .where(p.c.distance >= 1)
+            .where(e.c.epa.isnot(None))
+            .group_by(p.c.down, distance_bucket, play_type_col)
+            .having(func.count() >= 50)
+        )
+
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+
+        return [
+            {
+                "down": row.down,
+                "distance_bucket": row.distance_bucket,
+                "play_type": row.play_type,
+                "success_rate": round(float(row.success_rate) * 100, 1),
+                "count": row.count,
+            }
+            for row in rows
+        ]
+
+    return _viz_cached(cache_key, _compute)
 
 
 @router.get("/viz/ep-by-yardline")
@@ -1576,72 +1841,104 @@ def viz_ep_by_yardline(
     game_type: str = Query(default="regular"),
 ):
     """Average EP by distance to endzone (yardline_100), split by down."""
-    import pandas as pd
-
-    from isfl_epa.epa.dataset import _derive_possession_team_from_home_away
-    from isfl_epa.epa.features import compute_yardline_100
-
     engine = request.app.state.engine
-    p = plays_table
-    pe = play_epa_table
-
     eff_min = season_min or 1
     eff_max = season_max or 999
+    cache_key = ("ep-by-yardline", eff_min, eff_max, game_type)
 
-    stmt = (
-        select(
-            p.c.game_id,
-            p.c.yard_line,
-            p.c.yard_line_team,
-            p.c.possession_team_id,
-            p.c.home_team,
-            p.c.away_team,
-            p.c.down,
-            pe.c.ep_before,
+    def _compute():
+        p = plays_table
+        pe = play_epa_table
+
+        # Compute yardline_100 in SQL: if yard_line_team matches possession
+        # team abbreviation, use yard_line; otherwise 100 - yard_line.
+        # We need to resolve possession_team_id -> abbreviation to compare
+        # with yard_line_team. Use a subquery that joins team info.
+        #
+        # However, team_id -> abbr mapping requires the intersection-based
+        # approach. Instead, we use the fact that for seasons with home_team/
+        # away_team, we can derive possession_team from those fields.
+        # For S27+: possession_team_id corresponds to one of home_team/away_team.
+        # For S1-26: home_team/away_team are NULL, but we still have
+        # yard_line_team and possession_team_id — we need the mapping.
+        #
+        # Simplest SQL approach: compute yardline_100 as a CASE on whether
+        # yard_line_team equals home_team or away_team (which tells us
+        # which side of the field), combined with possession info.
+        #
+        # Actually, the simplest: build team map once, then use SQL with
+        # a values list or just do it all in SQL with a self-join approach.
+        #
+        # Most practical: do the aggregation in SQL by computing yardline_100
+        # using a helper table. But that's complex. Let's take a middle ground:
+        # build the ptid->abbr map efficiently (single query), then use pandas
+        # but only fetch needed columns.
+
+        # First, build ptid->abbr map with a single query across all seasons
+        with engine.connect() as conn:
+            season_stmt = select(distinct(p.c.season)).where(
+                p.c.season.between(eff_min, eff_max)
+            )
+            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+
+            if not seasons:
+                return []
+
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
+
+        if not ptid_abbrs:
+            return []
+
+        # yardline_100: if yard_line_team matches any abbreviation for the
+        # possession team, use yard_line; otherwise 100 - yard_line.
+        # Handles rebranded teams (e.g., CHI→OSK) by checking all abbreviations.
+        same_side_cases = [
+            (and_(p.c.possession_team_id == ptid, p.c.yard_line_team.in_(abbrs)), p.c.yard_line)
+            for ptid, abbrs in ptid_abbrs.items()
+        ]
+        yardline_100 = case(*same_side_cases, else_=100 - p.c.yard_line)
+
+        # Bucket into groups of 5 yards
+        bucket = cast(yardline_100 / 5, Integer) * 5
+
+        stmt = (
+            select(
+                bucket.label("yardline"),
+                p.c.down,
+                func.avg(pe.c.ep_before).label("avg_ep"),
+                func.count().label("count"),
+            )
+            .select_from(p)
+            .join(pe, pe.c.play_id == p.c.id)
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
+            .where(p.c.down.in_([1, 2, 3, 4]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.yard_line.isnot(None))
+            .where(p.c.yard_line_team.isnot(None))
+            .where(p.c.possession_team_id.isnot(None))
+            .where(pe.c.ep_before.isnot(None))
+            .where(yardline_100 >= 1)
+            .where(yardline_100 <= 99)
+            .group_by(bucket, p.c.down)
+            .having(func.count() >= 100)
+            .order_by(bucket, p.c.down)
         )
-        .select_from(p)
-        .join(pe, pe.c.play_id == p.c.id)
-        .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
-        .where(p.c.down.in_([1, 2, 3, 4]))
-        .where(p.c.game_type == game_type)
-        .where(p.c.season.between(eff_min, eff_max))
-        .where(p.c.yard_line.isnot(None))
-        .where(p.c.yard_line_team.isnot(None))
-        .where(p.c.home_team.isnot(None))
-        .where(p.c.away_team.isnot(None))
-        .where(pe.c.ep_before.isnot(None))
-    )
 
-    with engine.connect() as conn:
-        df = pd.read_sql(stmt, conn)
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
 
-    if df.empty:
-        return []
+        return [
+            {
+                "yardline": row.yardline,
+                "down": row.down,
+                "avg_ep": round(float(row.avg_ep), 4),
+                "count": row.count,
+            }
+            for row in rows
+        ]
 
-    # Derive possession_team using intersection-based mapping
-    df["possession_team"] = _derive_possession_team_from_home_away(df)
-    df["yardline_100"] = compute_yardline_100(df)
-    df = df.dropna(subset=["yardline_100"])
-    df = df[(df["yardline_100"] >= 1) & (df["yardline_100"] <= 99)]
-
-    # Bucket into groups of 5 yards
-    df["bucket"] = (df["yardline_100"] // 5).astype(int) * 5
-
-    from collections import defaultdict
-    buckets: dict[tuple[int, int], list[float]] = defaultdict(list)
-    for _, row in df.iterrows():
-        buckets[(row["bucket"], row["down"])].append(float(row["ep_before"]))
-
-    result = []
-    for (yardline, down), eps in sorted(buckets.items()):
-        if len(eps) >= 100:
-            result.append({
-                "yardline": yardline,
-                "down": down,
-                "avg_ep": round(sum(eps) / len(eps), 4),
-                "count": len(eps),
-            })
-    return result
+    return _viz_cached(cache_key, _compute)
 
 
 @router.get("/viz/ep-by-time")
@@ -1653,59 +1950,401 @@ def viz_ep_by_time(
 ):
     """Average EP by time remaining in half, split by down."""
     engine = request.app.state.engine
-    p = plays_table
-    pe = play_epa_table
-
     eff_min = season_min or 1
     eff_max = season_max or 999
+    cache_key = ("ep-by-time", eff_min, eff_max, game_type)
 
-    stmt = (
-        select(
-            p.c.clock,
-            p.c.quarter,
-            p.c.down,
-            pe.c.ep_before,
+    def _compute():
+        p = plays_table
+        pe = play_epa_table
+
+        # Parse clock "MM:SS" to seconds in SQL
+        # Use split_part for PostgreSQL, instr+substr for SQLite
+        is_sqlite = engine.dialect.name == "sqlite"
+        if is_sqlite:
+            colon_pos = func.instr(p.c.clock, ":")
+            minutes_str = func.substr(p.c.clock, 1, colon_pos - 1)
+            seconds_str = func.substr(p.c.clock, colon_pos + 1)
+        else:
+            minutes_str = func.split_part(p.c.clock, ":", 1)
+            seconds_str = func.split_part(p.c.clock, ":", 2)
+        clock_secs = cast(minutes_str, Integer) * 60 + cast(seconds_str, Integer)
+
+        # Half seconds remaining based on quarter
+        half_secs = case(
+            (p.c.quarter >= 5, 0),
+            (p.c.quarter.in_([1, 3]), clock_secs + 900),
+            else_=clock_secs,
         )
-        .select_from(p)
-        .join(pe, pe.c.play_id == p.c.id)
-        .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
-        .where(p.c.down.in_([1, 2, 3, 4]))
-        .where(p.c.game_type == game_type)
-        .where(p.c.season.between(eff_min, eff_max))
-        .where(p.c.clock.isnot(None))
-        .where(p.c.quarter.isnot(None))
-        .where(pe.c.ep_before.isnot(None))
+
+        minute_bucket = cast(half_secs / 60, Integer).label("minute")
+
+        stmt = (
+            select(
+                minute_bucket,
+                p.c.down,
+                func.avg(pe.c.ep_before).label("avg_ep"),
+                func.count().label("count"),
+            )
+            .select_from(p)
+            .join(pe, pe.c.play_id == p.c.id)
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
+            .where(p.c.down.in_([1, 2, 3, 4]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.clock.isnot(None))
+            .where(p.c.quarter.isnot(None))
+            .where(pe.c.ep_before.isnot(None))
+            .group_by(minute_bucket, p.c.down)
+            .having(func.count() >= 100)
+            .order_by(minute_bucket, p.c.down)
+        )
+
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+
+        return [
+            {
+                "minute": row.minute,
+                "down": row.down,
+                "avg_ep": round(float(row.avg_ep), 4),
+                "count": row.count,
+            }
+            for row in rows
+        ]
+
+    return _viz_cached(cache_key, _compute)
+
+
+@router.get("/viz/ep-by-drive-start")
+def viz_ep_by_drive_start(
+    request: Request,
+    season_min: int = Query(default=None),
+    season_max: int = Query(default=None),
+    game_type: str = Query(default="regular"),
+):
+    """Average EP at the start of each drive, bucketed by starting yardline."""
+    engine = request.app.state.engine
+    eff_min = season_min or 1
+    eff_max = season_max or 999
+    cache_key = ("ep-by-drive-start", eff_min, eff_max, game_type)
+
+    def _compute():
+        p = plays_table
+        pe = play_epa_table
+
+        # Compute half from quarter (portable)
+        half = case(
+            (p.c.quarter <= 2, 1),
+            (p.c.quarter <= 4, 2),
+            else_=3,
+        )
+
+        # Window: LAG over scrimmage plays within each game
+        win = {"partition_by": p.c.game_id, "order_by": p.c.play_index}
+        prev_ptid = func.lag(p.c.possession_team_id).over(**win)
+        prev_half = func.lag(half).over(**win)
+
+        # CTE: scrimmage plays with drive-start detection columns
+        prev_idx = func.lag(p.c.play_index).over(**win)
+        scrimmage = (
+            select(
+                p.c.id.label("play_id"),
+                p.c.game_id,
+                p.c.play_index,
+                p.c.season,
+                p.c.possession_team_id,
+                p.c.yard_line,
+                p.c.yard_line_team,
+                prev_ptid.label("prev_ptid"),
+                prev_half.label("prev_half"),
+                prev_idx.label("prev_idx"),
+                half.label("half"),
+            )
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.possession_team_id.isnot(None))
+            .where(p.c.yard_line.isnot(None))
+            .where(p.c.yard_line_team.isnot(None))
+            .where(p.c.quarter.isnot(None))
+        ).cte("scrimmage")
+
+        # Check if a kickoff occurred between previous and current scrimmage play
+        kickoff_between = exists(
+            select(literal_column("1")).select_from(p)
+            .where(p.c.game_id == scrimmage.c.game_id)
+            .where(p.c.play_type == "kickoff")
+            .where(p.c.play_index > scrimmage.c.prev_idx)
+            .where(p.c.play_index < scrimmage.c.play_index)
+        )
+
+        # Filter to drive starts: first play, possession/half changed, or kickoff between
+        drive_starts = (
+            select(scrimmage)
+            .where(
+                or_(
+                    scrimmage.c.prev_ptid.is_(None),
+                    scrimmage.c.possession_team_id != scrimmage.c.prev_ptid,
+                    scrimmage.c.half != scrimmage.c.prev_half,
+                    kickoff_between,
+                )
+            )
+        ).cte("drive_starts")
+
+        # Build ptid->abbr map for yardline_100 computation
+        with engine.connect() as conn:
+            season_stmt = select(distinct(p.c.season)).where(
+                p.c.season.between(eff_min, eff_max)
+            )
+            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+
+            if not seasons:
+                return []
+
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
+
+        if not ptid_abbrs:
+            return []
+
+        # yardline_100: check yard_line_team against all abbreviations for
+        # the possession team (handles rebrands like CHI→OSK)
+        same_side_cases = [
+            (and_(drive_starts.c.possession_team_id == ptid, drive_starts.c.yard_line_team.in_(abbrs)), drive_starts.c.yard_line)
+            for ptid, abbrs in ptid_abbrs.items()
+        ]
+        yardline_100 = case(*same_side_cases, else_=100 - drive_starts.c.yard_line)
+
+        bucket = cast(yardline_100 / 5, Integer) * 5
+
+        stmt = (
+            select(
+                bucket.label("yardline"),
+                func.avg(pe.c.ep_before).label("avg_ep"),
+                func.count().label("count"),
+            )
+            .select_from(drive_starts)
+            .join(pe, pe.c.play_id == drive_starts.c.play_id)
+            .where(pe.c.ep_before.isnot(None))
+            .where(yardline_100 >= 1)
+            .where(yardline_100 <= 99)
+            .group_by(bucket)
+            .having(func.count() >= 30)
+            .order_by(bucket)
+        )
+
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+
+        return [
+            {
+                "yardline": row.yardline,
+                "avg_ep": round(float(row.avg_ep), 4),
+                "count": row.count,
+            }
+            for row in rows
+        ]
+
+    return _viz_cached(cache_key, _compute)
+
+
+def _fourth_down_score_filter(p, ptid_abbrs, score_filter):
+    """Return a list of SQL WHERE clauses for winning/losing/all score filter."""
+    if score_filter == "all":
+        return []
+
+    # Build score_diff: possession team's score minus opponent's score.
+    # If possession_team matches home_team abbrs -> score_home - score_away, else opposite.
+    home_cases = [
+        (and_(p.c.possession_team_id == ptid, p.c.home_team.in_(abbrs)), 1)
+        for ptid, abbrs in ptid_abbrs.items()
+    ]
+    is_home = case(*home_cases, else_=0)
+    score_diff = case(
+        (is_home == 1, p.c.score_home - p.c.score_away),
+        else_=p.c.score_away - p.c.score_home,
     )
 
-    from collections import defaultdict
-    buckets: dict[tuple[int, int], list[float]] = defaultdict(list)
+    filters = [p.c.score_home.isnot(None), p.c.score_away.isnot(None)]
+    if score_filter == "winning":
+        filters.append(score_diff > 0)
+    elif score_filter == "losing":
+        filters.append(score_diff < 0)
+    elif score_filter == "tied":
+        filters.append(score_diff == 0)
+    return filters
 
-    with engine.connect() as conn:
-        for row in conn.execute(stmt):
-            try:
-                parts = str(row.clock).split(":")
-                mins = int(parts[0])
-                secs = int(parts[1]) if len(parts) > 1 else 0
-                clock_secs = mins * 60 + secs
-            except (ValueError, IndexError):
-                continue
-            q = row.quarter
-            if q >= 5:
-                half_secs = 0
-            elif q in (1, 3):
-                half_secs = clock_secs + 900
-            else:
-                half_secs = clock_secs
-            minute = half_secs // 60
-            buckets[(minute, row.down)].append(float(row.ep_before))
 
-    result = []
-    for (minute, down), eps in sorted(buckets.items()):
-        if len(eps) >= 100:
-            result.append({
-                "minute": minute,
-                "down": down,
-                "avg_ep": round(sum(eps) / len(eps), 4),
-                "count": len(eps),
-            })
-    return result
+def _fourth_down_count_exprs(p):
+    """Return (go_count, punt_count, fg_count, total) aggregate expressions."""
+    go_count = func.sum(case((p.c.play_type.in_(["pass", "rush", "sack"]), 1), else_=0))
+    punt_count = func.sum(case((p.c.play_type == "punt", 1), else_=0))
+    fg_count = func.sum(case((p.c.play_type == "field_goal", 1), else_=0))
+    return go_count, punt_count, fg_count, func.count()
+
+
+def _fourth_down_rows_to_dicts(rows, bucket_key):
+    """Convert rows with go_count/punt_count/fg_count/total to percentage dicts."""
+    return [
+        {
+            bucket_key: getattr(row, bucket_key),
+            "go_pct": round(100 * row.go_count / row.total, 2),
+            "punt_pct": round(100 * row.punt_count / row.total, 2),
+            "fg_pct": round(100 * row.fg_count / row.total, 2),
+            "total": row.total,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/viz/fourth-down-decisions")
+def viz_fourth_down_decisions(
+    request: Request,
+    season_min: int = Query(default=None),
+    season_max: int = Query(default=None),
+    game_type: str = Query(default="regular"),
+    score_filter: str = Query(default="all"),
+):
+    """4th down play type percentages (go for it / punt / field goal) by field position."""
+    engine = request.app.state.engine
+    eff_min = season_min or 1
+    eff_max = season_max or 999
+    cache_key = ("fourth-down-decisions", eff_min, eff_max, game_type, score_filter)
+
+    def _compute():
+        p = plays_table
+
+        with engine.connect() as conn:
+            season_stmt = select(distinct(p.c.season)).where(
+                p.c.season.between(eff_min, eff_max)
+            )
+            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+
+            if not seasons:
+                return []
+
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
+
+        if not ptid_abbrs:
+            return []
+
+        same_side_cases = [
+            (and_(p.c.possession_team_id == ptid, p.c.yard_line_team.in_(abbrs)), p.c.yard_line)
+            for ptid, abbrs in ptid_abbrs.items()
+        ]
+        yardline_100 = case(*same_side_cases, else_=100 - p.c.yard_line)
+        bucket = cast(yardline_100 / 5, Integer) * 5
+
+        go_count, punt_count, fg_count, total = _fourth_down_count_exprs(p)
+
+        stmt = (
+            select(
+                bucket.label("yardline"),
+                go_count.label("go_count"),
+                punt_count.label("punt_count"),
+                fg_count.label("fg_count"),
+                total.label("total"),
+            )
+            .where(p.c.down == 4)
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "punt", "field_goal"]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.yard_line.isnot(None))
+            .where(p.c.yard_line_team.isnot(None))
+            .where(p.c.possession_team_id.isnot(None))
+            .where(yardline_100 >= 1)
+            .where(yardline_100 <= 99)
+        )
+
+        for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
+            stmt = stmt.where(f)
+
+        stmt = stmt.group_by(bucket).having(func.count() >= 20).order_by(bucket)
+
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+
+        return _fourth_down_rows_to_dicts(rows, "yardline")
+
+    return _viz_cached(cache_key, _compute)
+
+
+@router.get("/viz/fourth-down-by-time")
+def viz_fourth_down_by_time(
+    request: Request,
+    season_min: int = Query(default=None),
+    season_max: int = Query(default=None),
+    game_type: str = Query(default="regular"),
+    score_filter: str = Query(default="all"),
+):
+    """4th down play type percentages by time remaining in half."""
+    engine = request.app.state.engine
+    eff_min = season_min or 1
+    eff_max = season_max or 999
+    cache_key = ("fourth-down-by-time", eff_min, eff_max, game_type, score_filter)
+
+    def _compute():
+        p = plays_table
+
+        with engine.connect() as conn:
+            season_stmt = select(distinct(p.c.season)).where(
+                p.c.season.between(eff_min, eff_max)
+            )
+            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+
+            if not seasons:
+                return []
+
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
+
+        if not ptid_abbrs:
+            return []
+
+        # Parse clock to half-seconds remaining
+        is_sqlite = engine.dialect.name == "sqlite"
+        if is_sqlite:
+            colon_pos = func.instr(p.c.clock, ":")
+            minutes_str = func.substr(p.c.clock, 1, colon_pos - 1)
+            seconds_str = func.substr(p.c.clock, colon_pos + 1)
+        else:
+            minutes_str = func.split_part(p.c.clock, ":", 1)
+            seconds_str = func.split_part(p.c.clock, ":", 2)
+        clock_secs = cast(minutes_str, Integer) * 60 + cast(seconds_str, Integer)
+
+        half_secs = case(
+            (p.c.quarter >= 5, 0),
+            (p.c.quarter.in_([1, 3]), clock_secs + 900),
+            else_=clock_secs,
+        )
+        minute_bucket = cast(half_secs / 60, Integer)
+
+        go_count, punt_count, fg_count, total = _fourth_down_count_exprs(p)
+
+        stmt = (
+            select(
+                minute_bucket.label("minute"),
+                go_count.label("go_count"),
+                punt_count.label("punt_count"),
+                fg_count.label("fg_count"),
+                total.label("total"),
+            )
+            .where(p.c.down == 4)
+            .where(p.c.play_type.in_(["pass", "rush", "sack", "punt", "field_goal"]))
+            .where(p.c.game_type == game_type)
+            .where(p.c.season.between(eff_min, eff_max))
+            .where(p.c.clock.isnot(None))
+            .where(p.c.quarter.isnot(None))
+            .where(p.c.possession_team_id.isnot(None))
+        )
+
+        for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
+            stmt = stmt.where(f)
+
+        stmt = stmt.group_by(minute_bucket).having(func.count() >= 20).order_by(minute_bucket)
+
+        with engine.connect() as conn:
+            rows = conn.execute(stmt).fetchall()
+
+        return _fourth_down_rows_to_dicts(rows, "minute")
+
+    return _viz_cached(cache_key, _compute)

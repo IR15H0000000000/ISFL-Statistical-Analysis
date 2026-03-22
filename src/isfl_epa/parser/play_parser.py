@@ -82,15 +82,15 @@ _ONSIDE_RECOVERY_RE = re.compile(
 )
 _FREE_KICK_RE = re.compile(r"Free Kick by (.+?) of (\d+) yards")
 _PUNT_RE = re.compile(r"Punt by (.+?) of (\d+) yards")
-_PUNT_BLOCKED_RE = re.compile(r"Punt by (.+?) is BLOCKED BY (.+?)\.")
+_PUNT_BLOCKED_RE = re.compile(r"Punt by (.+?) is BLOCKED BY (.+)\.(?=\.|<|\s|$)")
 _FG_RE = re.compile(r"(\d+) yard FG by (.+?) is (good|NO good)")
-_FG_BLOCKED_RE = re.compile(r"(\d+) yard FG by (.+?) is BLOCKED by (.+?)\.")
+_FG_BLOCKED_RE = re.compile(r"(\d+) yard FG by (.+?) is BLOCKED by (.+)\.(?=\.|<|\s|$)")
 _SACK_RE = re.compile(r"(.+?) (?:is )?SACKED by (.+?) - \w+ for (-?\d+) yds")
 _PASS_COMPLETE_RE = re.compile(
     r"Pass by (.+?), complete to (.+?) for (-?\d+ yds|a short gain)"
 )
 _PASS_INCOMPLETE_BROKEN_RE = re.compile(
-    r"Pass by (.+?) to (.+?) is incomplete\. Broken up by (.+?)\."
+    r"Pass by (.+?) to (.+?) is incomplete\. Broken up by (.+)\.(?=\.|<|\s|$)"
 )
 _PASS_INCOMPLETE_FALLS_RE = re.compile(
     r"Pass by (.+?) to (.+?) falls incomplete"
@@ -122,7 +122,7 @@ _FIRST_DOWN_RE = re.compile(r"First Down")
 _FUMBLE_LOST_RE = re.compile(
     r"FUMBLE recovered by (.+?) at .+? yard line and returned for (\d+)"
 )
-_FUMBLE_KEPT_RE = re.compile(r"FUMBLE by (.+?), recovered by (.+?)\.")
+_FUMBLE_KEPT_RE = re.compile(r"FUMBLE by (.+?), recovered by (.+)\.(?=\.|<|\s|$)")
 _INTERCEPTION_RE = re.compile(
     r"INTERCEPTION by (.+?) at .+? yard line and returned for (-?\d+)"
 )
@@ -130,7 +130,7 @@ _TIMEOUT_APPENDED_RE = re.compile(r"Timeout called by (\w+)")
 _TURNOVER_ON_DOWNS_RE = re.compile(r"Turnover on downs")
 _AUTO_FIRST_DOWN_RE = re.compile(r"Automatic First Down")
 _SAFETY_RE = re.compile(r"Safety")
-_TACKLE_RE = re.compile(r"Tackle by (.+?)\.(?=\s|<|$)")
+_TACKLE_RE = re.compile(r"Tackle by (.+)\.(?=\.|<|\s|$)")
 _PUNT_RETURN_RE = re.compile(r"Returned by (.+?) for (\d+) yards")
 
 
@@ -449,13 +449,69 @@ def parse_game(raw_game: dict, season: int, league: str) -> Game:
             home_team = p.home_team
             break
 
-    # Derive team IDs from possession patterns
+    # Derive team IDs by correlating possession_team_id with team abbreviations.
+    # Strategy: find a kickoff followed by a scrimmage play — the scrimmage play's
+    # possession_team_id is the receiving team, and the yard_line_team on that play
+    # at the 25 (touchback) tells us which team that id belongs to.
     team_ids = {p.possession_team_id for p in plays if p.possession_team_id is not None}
-    if len(team_ids) == 2:
-        id_list = sorted(team_ids)
-        # Convention: in the score string, away team is listed first
-        # The team IDs map to the score string teams
-        away_team_id, home_team_id = id_list[0], id_list[1]
+    id_to_abbr: dict[int, str] = {}
+    if len(team_ids) == 2 and away_team and home_team:
+        known_abbrs = {away_team, home_team}
+        prev_was_kickoff = False
+        for p in plays:
+            if p.play_type == PlayType.KICKOFF:
+                prev_was_kickoff = True
+                continue
+            if (prev_was_kickoff
+                    and p.possession_team_id is not None
+                    and p.yard_line_team in known_abbrs
+                    and p.yard_line == 25):
+                # After a touchback, the receiving team starts at their own 25
+                # yard_line_team == receiving team == possession team
+                id_to_abbr[p.possession_team_id] = p.yard_line_team
+                if len(id_to_abbr) == 2:
+                    break
+            prev_was_kickoff = False
+
+        # Broader: first scrimmage play after any kickoff — the possession team
+        # is the receiving team, at their own yard line (return spot)
+        if len(id_to_abbr) < 2:
+            prev_was_kickoff = False
+            for p in plays:
+                if p.play_type == PlayType.KICKOFF:
+                    prev_was_kickoff = True
+                    continue
+                if (prev_was_kickoff
+                        and p.possession_team_id is not None
+                        and p.possession_team_id not in id_to_abbr
+                        and p.yard_line_team in known_abbrs
+                        and p.yard_line is not None
+                        and p.yard_line <= 45
+                        and p.play_type in (PlayType.PASS, PlayType.RUSH, PlayType.SACK)):
+                    id_to_abbr[p.possession_team_id] = p.yard_line_team
+                    if len(id_to_abbr) == 2:
+                        break
+                prev_was_kickoff = False
+
+        if len(id_to_abbr) == 2:
+            for tid, abbr in id_to_abbr.items():
+                if abbr == away_team:
+                    away_team_id = tid
+                elif abbr == home_team:
+                    home_team_id = tid
+        elif len(id_to_abbr) == 1:
+            known_id, known_abbr = next(iter(id_to_abbr.items()))
+            other_id = (team_ids - {known_id}).pop()
+            if known_abbr == away_team:
+                away_team_id = known_id
+                home_team_id = other_id
+            else:
+                home_team_id = known_id
+                away_team_id = other_id
+        else:
+            # Fallback: sorted IDs (old behavior)
+            id_list = sorted(team_ids)
+            away_team_id, home_team_id = id_list[0], id_list[1]
 
     total = len(plays)
     parsed_count = total - len(unparsed)

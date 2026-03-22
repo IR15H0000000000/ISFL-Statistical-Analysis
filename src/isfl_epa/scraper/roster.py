@@ -159,6 +159,11 @@ def _parse_roster_html(html: str) -> tuple[list[dict], str | None]:
 _SUFFIX_WORDS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
+def _to_ascii(name: str) -> str:
+    """Strip non-ASCII characters for matching purposes."""
+    return name.encode("ascii", "ignore").decode("ascii")
+
+
 def _clean_last_name(name: str) -> str:
     """Remove suffixes like Jr., III, etc. from a last name."""
     parts = name.split()
@@ -176,6 +181,7 @@ def _parse_name(name: str) -> tuple[str, str]:
     # Remove parenthetical tags like (C), (R), (BOT) and special chars
     cleaned = re.sub(r"\s*\([^)]*\)", "", name).strip()
     cleaned = re.sub(r"[™®©]", "", cleaned)
+    cleaned = _to_ascii(cleaned)
     # Remove trailing dots from initials like "F."
     cleaned = cleaned.rstrip(".")
 
@@ -208,6 +214,7 @@ def _parse_name_with_suffix(name: str) -> tuple[str, str]:
     # Remove parenthetical tags like (C), (R), (BOT) and special chars
     cleaned = re.sub(r"\s*\([^)]*\)", "", name).strip()
     cleaned = re.sub(r"[™®©]", "", cleaned)
+    cleaned = _to_ascii(cleaned)
     # Remove trailing dots
     cleaned = cleaned.rstrip(".")
 

@@ -5,3 +5,18 @@
 #   - canonical: "Smith, J."
 #     aliases: ["J. Smith", "Smith, John"]
 merge: []
+
+# Players whose full-name form ("First Last") should NOT be cross-matched
+# to "Last, Initial" format. Use when two distinct players share a last name
+# and first-name initial.
+no_cross_match:
+  - "Willeh Strong"   # LB, distinct from William Strong (RB)
+  - "William Strong"  # RB, distinct from Willeh Strong (LB)
+  - "Big Strong"       # DE, distinct from Strong, B.
+
+# Map abbreviated defensive names to the correct full-name player.
+# Used only during defensive stat aggregation when the same "Last, F." form
+# is shared by an offensive and defensive player.
+defensive_aliases:
+  "Strong, W.": "Willeh Strong"    # LB; the RB is William Strong
+  "Strong, B.": "Big Strong"       # DE; other Strong, B. entries are different

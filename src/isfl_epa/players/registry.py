@@ -39,6 +39,20 @@ def _strip_special(name: str) -> str:
     return re.sub(r"[™®©]", "", name)
 
 
+def _to_ascii(name: str) -> str:
+    """Strip non-ASCII characters for matching purposes.
+
+    Drops all non-ASCII characters so that both proper Unicode names
+    ('Košir') and their mojibake variants ('Koï¿½ir') reduce to the
+    same ASCII key ('Koir') for matching.
+
+    This is intentionally lossy (š -> dropped, not š -> s) because
+    mojibake completely destroys the original character and we need
+    both sides to produce the same key.
+    """
+    return name.encode("ascii", "ignore").decode("ascii")
+
+
 def _normalize(name: str) -> str:
     """Normalize a player name for matching.
 
@@ -48,6 +62,7 @@ def _normalize(name: str) -> str:
     """
     s = _strip_tags(name)
     s = _strip_special(s)
+    s = _to_ascii(s)
     s = s.lower()
     s = s.rstrip(".")
     s = re.sub(r"\s*,\s*", ", ", s)
@@ -118,6 +133,10 @@ class PlayerRegistry:
         self._next_id = 1
         # alias -> canonical normalized name (from overrides)
         self._overrides: dict[str, str] = {}
+        # normalized names that must NOT be cross-format matched
+        self._no_cross_match: set[str] = set()
+        # abbreviated name -> full canonical name for defensive disambiguation
+        self._defensive_aliases: dict[str, str] = {}
         self._load_overrides()
 
     def _load_overrides(self) -> None:
@@ -131,6 +150,10 @@ class PlayerRegistry:
             canonical = _normalize(entry["canonical"])
             for alias in entry.get("aliases", []):
                 self._overrides[_normalize(alias)] = canonical
+        for name in data.get("no_cross_match", []):
+            self._no_cross_match.add(_normalize(name))
+        for abbrev, canonical in data.get("defensive_aliases", {}).items():
+            self._defensive_aliases[_normalize(abbrev)] = canonical
 
     def get_or_create(self, name: str, season: int, team: str | None = None) -> int:
         """Return the player_id for this name, creating if needed.
@@ -149,7 +172,36 @@ class PlayerRegistry:
         if resolved != norm:
             logger.debug("Override resolved '%s' -> '%s'", norm, resolved)
 
-        # Check if we already have this name
+        # Team-qualified exact match (disambiguates "Smith, D." on SAR vs BAL)
+        if team:
+            team_norm = f"{resolved}|{team}"
+            if team_norm in self._name_to_id:
+                pid = self._name_to_id[team_norm]
+                self._update_player(pid, clean, season, team)
+                return pid
+
+        # Team-qualified cross-format match BEFORE unqualified exact match
+        # This ensures "Dan Smith" on SAR finds the SAR player via "smith, d|SAR"
+        # before falling back to a stale "dan smith" → wrong player mapping.
+        if team and norm not in self._no_cross_match:
+            alt_key = _to_last_first_key(name)
+            if alt_key:
+                team_key = f"{alt_key}|{team}"
+                if team_key in self._name_to_id:
+                    pid = self._name_to_id[team_key]
+                    self._update_player(pid, clean, season, team)
+                    self._name_to_id[norm] = pid
+                    return pid
+            short_key = _to_last_first_key_short(name)
+            if short_key:
+                team_key = f"{short_key}|{team}"
+                if team_key in self._name_to_id:
+                    pid = self._name_to_id[team_key]
+                    self._update_player(pid, clean, season, team)
+                    self._name_to_id[norm] = pid
+                    return pid
+
+        # Unqualified exact match
         if resolved in self._name_to_id:
             pid = self._name_to_id[resolved]
             self._update_player(pid, clean, season, team)
@@ -157,21 +209,21 @@ class PlayerRegistry:
                 self._name_to_id[norm] = pid
             return pid
 
-        # Cross-format match: "Peaquod Von Turbo" ↔ "Von Turbo, P."
-        alt_key = _to_last_first_key(name)
-        if alt_key and alt_key in self._name_to_id:
-            pid = self._name_to_id[alt_key]
-            self._update_player(pid, clean, season, team)
-            self._name_to_id[norm] = pid
-            return pid
+        # Unqualified cross-format match
+        if norm not in self._no_cross_match:
+            alt_key = _to_last_first_key(name)
+            if alt_key and alt_key in self._name_to_id:
+                pid = self._name_to_id[alt_key]
+                self._update_player(pid, clean, season, team)
+                self._name_to_id[norm] = pid
+                return pid
 
-        # Short cross-format: "Jean Claude Goddamn" ↔ "Goddamn, J."
-        short_key = _to_last_first_key_short(name)
-        if short_key and short_key in self._name_to_id:
-            pid = self._name_to_id[short_key]
-            self._update_player(pid, clean, season, team)
-            self._name_to_id[norm] = pid
-            return pid
+            short_key = _to_last_first_key_short(name)
+            if short_key and short_key in self._name_to_id:
+                pid = self._name_to_id[short_key]
+                self._update_player(pid, clean, season, team)
+                self._name_to_id[norm] = pid
+                return pid
 
         # Create new player
         pid = self._next_id
@@ -180,6 +232,8 @@ class PlayerRegistry:
         self._name_to_id[resolved] = pid
         if norm != resolved:
             self._name_to_id[norm] = pid
+        # Store team-qualified cross-format keys for disambiguation
+        self._register_team_keys(name, team, pid)
         self._players[pid] = {
             "canonical_name": clean,
             "first_seen_season": season,
@@ -187,6 +241,68 @@ class PlayerRegistry:
         }
         self._aliases[pid] = [{"name": clean, "season": season, "team": team}]
         return pid
+
+    def force_create_for_team(self, name: str, season: int, team: str) -> int:
+        """Create or find a player using team-qualified keys only.
+
+        Used for ambiguous names (e.g., two "Smith, D." on different teams).
+        Checks team-qualified key first; if not found, creates a new player
+        and stores only team-qualified keys (not the unqualified key).
+        """
+        clean = _strip_special(_strip_tags(name))
+        norm = _normalize(name)
+
+        # Check team-qualified exact match
+        team_norm = f"{norm}|{team}"
+        if team_norm in self._name_to_id:
+            pid = self._name_to_id[team_norm]
+            self._update_player(pid, clean, season, team)
+            return pid
+
+        # Create new player — only store team-qualified keys, not the plain key
+        pid = self._next_id
+        self._next_id += 1
+        logger.debug("New ambiguous player id=%d name='%s' team=%s season=%d", pid, clean, team, season)
+        # Do NOT store unqualified norm key — it's ambiguous
+        self._register_team_keys(name, team, pid)
+        self._players[pid] = {
+            "canonical_name": clean,
+            "first_seen_season": season,
+            "last_seen_season": season,
+        }
+        self._aliases[pid] = [{"name": clean, "season": season, "team": team}]
+        return pid
+
+    def resolve_defensive(self, name: str, season: int) -> int | None:
+        """Resolve an abbreviated defender name using defensive_aliases.
+
+        If the overrides file maps this abbreviated name (e.g. "Strong, W.")
+        to a full-name canonical player (e.g. "Willeh Strong"), return that
+        player's ID.  Returns None if no defensive alias is configured.
+        """
+        norm = _normalize(name)
+        canonical = self._defensive_aliases.get(norm)
+        if not canonical:
+            return None
+        canonical_norm = _normalize(canonical)
+        if canonical_norm in self._name_to_id:
+            return self._name_to_id[canonical_norm]
+        return None
+
+    def _register_team_keys(self, name: str, team: str | None, pid: int) -> None:
+        """Store team-qualified keys for disambiguation."""
+        if not team:
+            return
+        # Team-qualified normalized key (for exact match disambiguation)
+        norm = _normalize(name)
+        self._name_to_id[f"{norm}|{team}"] = pid
+        # Team-qualified cross-format keys
+        alt_key = _to_last_first_key(name)
+        if alt_key:
+            self._name_to_id[f"{alt_key}|{team}"] = pid
+        short_key = _to_last_first_key_short(name)
+        if short_key:
+            self._name_to_id[f"{short_key}|{team}"] = pid
 
     def _update_player(self, pid: int, name: str, season: int, team: str | None) -> None:
         """Update an existing player's metadata.
@@ -198,6 +314,9 @@ class PlayerRegistry:
             p["first_seen_season"] = season
         if season > p["last_seen_season"]:
             p["last_seen_season"] = season
+
+        # Register team-qualified keys for new team associations
+        self._register_team_keys(name, team, pid)
 
         # Add alias if new
         alias = {"name": name, "season": season, "team": team}

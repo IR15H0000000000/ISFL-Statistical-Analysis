@@ -253,6 +253,7 @@
     <a href="/static/leaderboard.html" class="active">Players</a>
     <a href="/static/plays.html">Plays</a>
     <a href="/static/visualizations.html">Viz</a>
+    <a href="/static/drives.html">Drives</a>
   </div>
   <nav>
     <button id="btn-passing" class="active" onclick="switchCategory('passing')">Passing</button>
@@ -342,6 +343,7 @@ const COLUMNS_PASSING = [
   { key: "interceptions",   label: "INT",     fmt: "int",  align: "right",  epa: false },
   { key: "sacks",           label: "Sck",     fmt: "int",  align: "right",  epa: false },
   { key: "pass_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "epa_plus",        label: "EPA+",    fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
   { key: "dropbacks",       label: "DB",      fmt: "int",  align: "right",  epa: false },
   { key: "epa_per_dropback",label: "EPA/DB",  fmt: "dec3", align: "right",  epa: true, ranked: true },
 ];
@@ -358,6 +360,7 @@ const COLUMNS_RUSHING = [
   { key: "td",              label: "TD",      fmt: "int",  align: "right",  epa: false },
   { key: "fumbles",         label: "Fum",     fmt: "int",  align: "right",  epa: false },
   { key: "rush_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "epa_plus",        label: "EPA+",    fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
   { key: "rush_attempts",   label: "Plays",   fmt: "int",  align: "right",  epa: false },
   { key: "epa_per_rush",    label: "EPA/R",   fmt: "dec3", align: "right",  epa: true, ranked: true },
 ];
@@ -369,12 +372,13 @@ const COLUMNS_RECEIVING = [
   { key: "position",        label: "Pos",     fmt: "str",  align: "left",   epa: false },
   { key: "games",           label: "G",       fmt: "int",  align: "right",  epa: false },
   { key: "receptions",      label: "Rec",     fmt: "int",  align: "right",  epa: false },
-  { key: "targets",         label: "Tgt",     fmt: "int",  align: "right",  epa: false },
   { key: "yards",           label: "Yds",     fmt: "int",  align: "right",  epa: false },
   { key: "yards_per_rec",   label: "Y/R",     fmt: "dec1", align: "right",  epa: false },
   { key: "td",              label: "TD",      fmt: "int",  align: "right",  epa: false },
   { key: "fumbles",         label: "Fum",     fmt: "int",  align: "right",  epa: false },
   { key: "recv_epa",        label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "epa_plus",        label: "EPA+",    fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
+  { key: "targets",         label: "Tgt",     fmt: "int",  align: "right",  epa: false },
   { key: "epa_per_target",  label: "EPA/T",   fmt: "dec3", align: "right",  epa: true, ranked: true },
 ];
 
@@ -390,6 +394,7 @@ const COLUMNS_DEFENSE = [
   { key: "forced_fumbles",   label: "FF",     fmt: "int",  align: "right",  epa: false },
   { key: "fumble_recoveries",label: "FR",     fmt: "int",  align: "right",  epa: false },
   { key: "def_epa",         label: "EPA",     fmt: "dec1", align: "right",  epa: true, ranked: true },
+  { key: "epa_plus",        label: "EPA+",    fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
   { key: "def_plays",       label: "Plays",   fmt: "int",  align: "right",  epa: false },
   { key: "epa_per_def_play",label: "EPA/P",   fmt: "dec3", align: "right",  epa: true, ranked: true },
 ];
@@ -531,7 +536,9 @@ function renderTable() {
     const vals = data.map(d => d[col.key]).filter(v => v != null);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
-    epaRanges[col.key] = { min, max, midpoint: (min + max) / 2 };
+    const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : (min + max) / 2;
+    const midpoint = col.zeroCentered ? 0 : mean;
+    epaRanges[col.key] = { min, max, midpoint };
   });
 
   buildHeaders();

@@ -60,7 +60,7 @@
     flex-wrap: wrap;
     gap: 0.75rem;
     align-items: center;
-    max-width: 1100px;
+    max-width: 1400px;
     margin: 1.5rem auto 0.75rem;
     padding: 0 1rem;
   }
@@ -88,11 +88,11 @@
   }
 
   .charts-wrap {
-    max-width: 1100px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 0 1rem 2rem;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
     gap: 2rem;
   }
 
@@ -112,9 +112,19 @@
     letter-spacing: 0.5px;
   }
 
+  .chart-card-wide {
+    grid-column: 1 / -1;
+  }
+
   .chart-container {
     position: relative;
-    height: 380px;
+    height: 320px;
+  }
+
+  @media (max-width: 900px) {
+    .charts-wrap {
+      grid-template-columns: 1fr;
+    }
   }
 
   .loading {
@@ -132,6 +142,24 @@
     font-size: 0.8rem;
   }
   footer a { color: #56d6d6; text-decoration: none; }
+
+  .down-toggle {
+    padding: 0.35rem 0.85rem;
+    border: 1px solid #ccc;
+    background: #fff;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    color: #666;
+  }
+  .down-toggle:first-child { border-radius: 4px 0 0 4px; }
+  .down-toggle:last-child { border-radius: 0 4px 4px 0; }
+  .down-toggle:not(:first-child) { border-left: none; }
+  .down-toggle.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
 </style>
 </head>
 <body>
@@ -144,6 +172,7 @@
     <a href="/static/leaderboard.html">Players</a>
     <a href="/static/plays.html">Plays</a>
     <a href="/static/visualizations.html" class="active">Viz</a>
+    <a href="/static/drives.html">Drives</a>
   </div>
 </header>
 
@@ -159,7 +188,28 @@
 </div>
 
 <div class="charts-wrap">
-  <div class="loading" id="loading">Loading...</div>
+  <div class="loading chart-card-wide" id="loading">Loading...</div>
+
+  <div class="chart-card chart-card-wide" id="card-down-distance" style="display:none">
+    <h2>Success Rate by Down &amp; Distance (Pass vs Rush)</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;align-items:center;">
+      <div class="chart-toggles" style="display:flex;gap:0;">
+        <button class="down-toggle active" data-down="1" onclick="toggleDown(1)">1st Down</button>
+        <button class="down-toggle active" data-down="2" onclick="toggleDown(2)">2nd Down</button>
+        <button class="down-toggle active" data-down="3" onclick="toggleDown(3)">3rd Down</button>
+        <button class="down-toggle active" data-down="4" onclick="toggleDown(4)">4th Down</button>
+      </div>
+      <div class="chart-toggles" style="display:flex;gap:0;">
+        <button class="down-toggle active" data-bucket="Short" onclick="toggleBucket('Short')">Short (1-3)</button>
+        <button class="down-toggle active" data-bucket="Medium" onclick="toggleBucket('Medium')">Medium (4-7)</button>
+        <button class="down-toggle active" data-bucket="Long" onclick="toggleBucket('Long')">Long (8-12)</button>
+        <button class="down-toggle active" data-bucket="Very Long" onclick="toggleBucket('Very Long')">Very Long (13+)</button>
+      </div>
+    </div>
+    <div class="chart-container">
+      <canvas id="chart-down-distance"></canvas>
+    </div>
+  </div>
 
   <div class="chart-card" id="card-distance" style="display:none">
     <h2>Expected Points by Distance to First Down</h2>
@@ -181,6 +231,43 @@
       <canvas id="chart-time"></canvas>
     </div>
   </div>
+
+  <div class="chart-card" id="card-drive-start" style="display:none">
+    <h2>Expected Points by Drive Starting Field Position</h2>
+    <div class="chart-container">
+      <canvas id="chart-drive-start"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card" id="card-fourth-down" style="display:none">
+    <h2>4th Down Decision by Field Position</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;align-items:center;">
+      <div class="mode-toggle" id="fd-score-toggle">
+        <button class="active" data-score="all" onclick="switchFdScore('all')">All</button>
+        <button data-score="winning" onclick="switchFdScore('winning')">Winning</button>
+        <button data-score="losing" onclick="switchFdScore('losing')">Losing</button>
+        <button data-score="tied" onclick="switchFdScore('tied')">Tied</button>
+      </div>
+    </div>
+    <div class="chart-container">
+      <canvas id="chart-fourth-down"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-card" id="card-fourth-down-time" style="display:none">
+    <h2>4th Down Decision by Time Remaining in Half</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;align-items:center;">
+      <div class="mode-toggle" id="fdt-score-toggle">
+        <button class="active" data-score="all" onclick="switchFdtScore('all')">All</button>
+        <button data-score="winning" onclick="switchFdtScore('winning')">Winning</button>
+        <button data-score="losing" onclick="switchFdtScore('losing')">Losing</button>
+        <button data-score="tied" onclick="switchFdtScore('tied')">Tied</button>
+      </div>
+    </div>
+    <div class="chart-container">
+      <canvas id="chart-fourth-down-time"></canvas>
+    </div>
+  </div>
 </div>
 
 <footer>
@@ -190,9 +277,18 @@
 <script>
 let currentEra = "modern";
 let currentGameType = "regular";
+let downDistChart = null;
 let distanceChart = null;
 let yardlineChart = null;
 let timeChart = null;
+let driveStartChart = null;
+let fourthDownChart = null;
+let fourthDownTimeChart = null;
+let fdScoreFilter = "all";
+let fdtScoreFilter = "all";
+let ddRawData = null;  // stored for down toggle rebuilds
+let activeDowns = new Set([1, 2, 3, 4]);
+let activeBuckets = new Set(["Short", "Medium", "Long", "Very Long"]);
 
 const PASS_COLOR = "rgb(86, 214, 214)";
 const RUSH_COLOR = "rgb(255, 159, 64)";
@@ -292,26 +388,38 @@ function switchEra(era) {
 
 async function reloadCharts() {
   document.getElementById("loading").style.display = "";
+  document.getElementById("card-down-distance").style.display = "none";
   document.getElementById("card-distance").style.display = "none";
   document.getElementById("card-yardline").style.display = "none";
   document.getElementById("card-time").style.display = "none";
+  document.getElementById("card-drive-start").style.display = "none";
+  document.getElementById("card-fourth-down").style.display = "none";
+  document.getElementById("card-fourth-down-time").style.display = "none";
 
   const params = getParams();
 
   try {
-    const [distResp, ylResp, timeResp] = await Promise.all([
+    const [ddResp, distResp, ylResp, timeResp, dsResp] = await Promise.all([
+      fetch(`/epa/viz/epa-by-down-distance?${params}`),
       fetch(`/epa/viz/ep-by-distance?${params}`),
       fetch(`/epa/viz/ep-by-yardline?${params}`),
       fetch(`/epa/viz/ep-by-time?${params}`),
+      fetch(`/epa/viz/ep-by-drive-start?${params}`),
     ]);
 
-    if (!distResp.ok || !ylResp.ok || !timeResp.ok) throw new Error("Server error");
+    if (!ddResp.ok || !distResp.ok || !ylResp.ok || !timeResp.ok || !dsResp.ok) throw new Error("Server error");
 
+    const ddData = await ddResp.json();
     const distData = await distResp.json();
     const ylData = await ylResp.json();
     const timeData = await timeResp.json();
+    const dsData = await dsResp.json();
 
     document.getElementById("loading").style.display = "none";
+
+    // --- Down & Distance EPA chart (pass vs rush) ---
+    ddRawData = ddData;
+    buildDownDistChart();
 
     // --- Distance chart (by down) ---
     const distLabels = [...new Set(distData.map(d => d.distance))].sort((a, b) => a - b);
@@ -391,10 +499,203 @@ async function reloadCharts() {
       options: chartOptions("Minutes Remaining in Half", "Expected Points"),
     });
 
+    // --- Drive Start EP chart ---
+    const dsLabels = dsData.map(d => d.yardline);
+    const dsDataset = {
+      label: "Avg EP at Drive Start",
+      data: dsData.map(d => d.avg_ep),
+      _counts: dsData.map(d => d.count),
+      borderColor: PASS_COLOR,
+      backgroundColor: PASS_BG,
+      tension: 0.3,
+      pointRadius: 3,
+      fill: true,
+    };
+
+    if (driveStartChart) driveStartChart.destroy();
+    document.getElementById("card-drive-start").style.display = "";
+    driveStartChart = new Chart(document.getElementById("chart-drive-start"), {
+      type: "line",
+      data: { labels: dsLabels, datasets: [dsDataset] },
+      options: chartOptions("Drive Start (Yards from Own Endzone)", "Expected Points"),
+    });
+
+    // --- 4th Down charts (fetched independently for score filter) ---
+    await Promise.all([reloadFourthDown(), reloadFourthDownTime()]);
+
   } catch (e) {
     document.getElementById("loading").textContent = "Error: " + e.message;
     document.getElementById("loading").style.display = "";
   }
+}
+
+function makeFdDatasets(data, valueKey) {
+  return [
+    {
+      label: "Go For It",
+      data: data.map(d => d.go_pct),
+      _counts: data.map(d => d.total),
+      borderColor: "rgb(86, 214, 214)",
+      backgroundColor: "rgba(86, 214, 214, 0.1)",
+      tension: 0.3, pointRadius: 3, fill: false,
+    },
+    {
+      label: "Punt",
+      data: data.map(d => d.punt_pct),
+      _counts: data.map(d => d.total),
+      borderColor: "rgb(255, 159, 64)",
+      backgroundColor: "rgba(255, 159, 64, 0.1)",
+      tension: 0.3, pointRadius: 3, fill: false,
+    },
+    {
+      label: "Field Goal",
+      data: data.map(d => d.fg_pct),
+      _counts: data.map(d => d.total),
+      borderColor: "rgb(153, 102, 255)",
+      backgroundColor: "rgba(153, 102, 255, 0.1)",
+      tension: 0.3, pointRadius: 3, fill: false,
+    },
+  ];
+}
+
+async function reloadFourthDown() {
+  const params = getParams();
+  params.set("score_filter", fdScoreFilter);
+  const resp = await fetch(`/epa/viz/fourth-down-decisions?${params}`);
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const labels = data.map(d => d.yardline);
+
+  if (fourthDownChart) fourthDownChart.destroy();
+  document.getElementById("card-fourth-down").style.display = "";
+  fourthDownChart = new Chart(document.getElementById("chart-fourth-down"), {
+    type: "line",
+    data: { labels, datasets: makeFdDatasets(data) },
+    options: chartOptions("Yards from Own Endzone", "Usage (%)"),
+  });
+}
+
+async function reloadFourthDownTime() {
+  const params = getParams();
+  params.set("score_filter", fdtScoreFilter);
+  const resp = await fetch(`/epa/viz/fourth-down-by-time?${params}`);
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const labels = data.map(d => d.minute);
+
+  if (fourthDownTimeChart) fourthDownTimeChart.destroy();
+  document.getElementById("card-fourth-down-time").style.display = "";
+  fourthDownTimeChart = new Chart(document.getElementById("chart-fourth-down-time"), {
+    type: "line",
+    data: { labels, datasets: makeFdDatasets(data) },
+    options: chartOptions("Minutes Remaining in Half", "Usage (%)"),
+  });
+}
+
+function switchFdScore(val) {
+  fdScoreFilter = val;
+  document.querySelectorAll("#fd-score-toggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.score === val);
+  });
+  reloadFourthDown();
+}
+
+function switchFdtScore(val) {
+  fdtScoreFilter = val;
+  document.querySelectorAll("#fdt-score-toggle button").forEach(b => {
+    b.classList.toggle("active", b.dataset.score === val);
+  });
+  reloadFourthDownTime();
+}
+
+function buildDownDistChart() {
+  if (!ddRawData) return;
+  const BUCKET_ORDER = ["Short", "Medium", "Long", "Very Long"].filter(b => activeBuckets.has(b));
+  const downs = [1, 2, 3, 4].filter(d => activeDowns.has(d));
+  const downLabels = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"};
+
+  const labels = [];
+  for (const b of BUCKET_ORDER) {
+    for (const d of downs) {
+      labels.push(`${downLabels[d]} & ${b}`);
+    }
+  }
+
+  const passVals = []; const passCounts = [];
+  const rushVals = []; const rushCounts = [];
+  for (const b of BUCKET_ORDER) {
+    for (const d of downs) {
+      const passRow = ddRawData.find(r => r.down === d && r.distance_bucket === b && r.play_type === "pass");
+      const rushRow = ddRawData.find(r => r.down === d && r.distance_bucket === b && r.play_type === "rush");
+      passVals.push(passRow ? passRow.success_rate : null);
+      passCounts.push(passRow ? passRow.count : 0);
+      rushVals.push(rushRow ? rushRow.success_rate : null);
+      rushCounts.push(rushRow ? rushRow.count : 0);
+    }
+  }
+
+  if (downDistChart) downDistChart.destroy();
+  document.getElementById("card-down-distance").style.display = "";
+  downDistChart = new Chart(document.getElementById("chart-down-distance"), {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: "Pass",
+          data: passVals,
+          _counts: passCounts,
+          backgroundColor: PASS_COLOR,
+          borderColor: PASS_COLOR,
+          borderWidth: 1,
+        },
+        {
+          label: "Rush",
+          data: rushVals,
+          _counts: rushCounts,
+          backgroundColor: RUSH_COLOR,
+          borderColor: RUSH_COLOR,
+          borderWidth: 1,
+        },
+      ],
+    },
+    options: {
+      ...chartOptions("Down & Distance", "Success Rate (%)"),
+      plugins: {
+        ...chartOptions("", "").plugins,
+        tooltip: {
+          callbacks: {
+            afterLabel: function(ctx) {
+              const counts = ctx.dataset._counts;
+              return counts ? `n = ${counts[ctx.dataIndex].toLocaleString()}` : "";
+            }
+          }
+        }
+      },
+    },
+  });
+}
+
+function toggleDown(down) {
+  if (activeDowns.has(down)) {
+    if (activeDowns.size <= 1) return;
+    activeDowns.delete(down);
+  } else {
+    activeDowns.add(down);
+  }
+  document.querySelector(`.down-toggle[data-down="${down}"]`).classList.toggle("active", activeDowns.has(down));
+  buildDownDistChart();
+}
+
+function toggleBucket(bucket) {
+  if (activeBuckets.has(bucket)) {
+    if (activeBuckets.size <= 1) return;
+    activeBuckets.delete(bucket);
+  } else {
+    activeBuckets.add(bucket);
+  }
+  document.querySelector(`.down-toggle[data-bucket="${bucket}"]`).classList.toggle("active", activeBuckets.has(bucket));
+  buildDownDistChart();
 }
 
 function switchGameType(gt) {

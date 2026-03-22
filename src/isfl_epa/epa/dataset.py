@@ -436,6 +436,7 @@ def label_drive_outcome(df: pd.DataFrame) -> pd.DataFrame:
     Drive boundaries are detected by:
     - Change of possession_team_id within a game
     - Half changes (quarter 1-2 vs 3-4 vs 5+)
+    - Kickoff plays (always start a new drive, handles onside kicks)
     - Scoring plays end the current drive
 
     Point values (from the drive's possession team perspective):
@@ -462,12 +463,14 @@ def label_drive_outcome(df: pd.DataFrame) -> pd.DataFrame:
 
     game_arr = df["game_id"].values
     poss_arr = df["possession_team_id"].values
+    play_type_arr = df["play_type"].values
     is_td = df["touchdown"].fillna(False).values.astype(bool)
     is_int = df["interception"].fillna(False).values.astype(bool)
     is_fumble = df["fumble_lost"].fillna(False).values.astype(bool)
     is_fg = ((df["play_type"] == "field_goal") & df["fg_good"].fillna(False).astype(bool)).values
     is_safety = df["safety"].fillna(False).values.astype(bool)
     pat_good = df["pat_good"].fillna(False).values.astype(bool)
+    is_kickoff = (play_type_arr == "kickoff")
 
     drive_points = np.zeros(len(df), dtype=float)
 
@@ -491,6 +494,10 @@ def label_drive_outcome(df: pd.DataFrame) -> pd.DataFrame:
             new_drive = False
             if curr_half != drive_half:
                 # Half changed — end previous drive with 0, start new
+                drive_points[drive_start:i] = 0.0
+                new_drive = True
+            elif is_kickoff[i]:
+                # Kickoff always starts a new drive (handles onside kicks)
                 drive_points[drive_start:i] = 0.0
                 new_drive = True
             elif curr_poss != drive_poss and not pd.isna(curr_poss):

@@ -100,6 +100,15 @@ def _scrape_season(
         )
         console.print(f"  Boxscores: {len(boxscores)} games")
 
+    # Always fetch game type classification alongside PBP/boxscore data
+    from collections import Counter
+
+    from isfl_epa.scraper.game_results import fetch_game_type_mapping
+
+    game_type_map = fetch_game_type_mapping(league, season, force_refresh=force_refresh)
+    gt_counts = Counter(game_type_map.values())
+    console.print(f"  Game types: {dict(gt_counts)}")
+
 
 @app.command()
 def explore(
@@ -136,6 +145,7 @@ def build(
         init_registry_from_db,
         load_registry,
         load_season,
+        seed_registry_from_roster,
     )
     from isfl_epa.storage.parquet import write_season_plays
 
@@ -155,7 +165,7 @@ def build(
 
     # Classify game types (preseason / regular / playoff)
     from isfl_epa.scraper.game_results import fetch_game_type_mapping
-    game_type_map = fetch_game_type_mapping(league, season)
+    game_type_map = fetch_game_type_mapping(league, season, force_refresh=True)
     for game in games:
         game.game_type = game_type_map.get(game.id, "regular")
     from collections import Counter
@@ -166,7 +176,23 @@ def build(
     engine = get_engine(database_url)
     create_tables(engine)
     registry = PlayerRegistry()
-    init_registry_from_db(engine, registry)
+    init_registry_from_db(engine, registry, exclude_season=season)
+
+    # Pre-seed from roster data (uses cache) for team-aware name disambiguation
+    from isfl_epa.scraper.roster import fetch_season_rosters, TEAM_ABBR_MAP
+    from isfl_epa.storage.database import get_team_id_to_abbr
+    roster, team_names = fetch_season_rosters(league, season)
+    if roster:
+        team_id_map = get_team_id_to_abbr(engine, season)
+        for tid, tname in team_names.items():
+            if tid not in team_id_map:
+                abbr = TEAM_ABBR_MAP.get(tname)
+                if abbr:
+                    team_id_map[tid] = abbr
+        seeded = seed_registry_from_roster(registry, roster, season, team_id_map)
+        if seeded:
+            console.print(f"  Pre-seeded {seeded} players from roster")
+
     registry.build_from_games(games)
     console.print(f"  Registered {registry.player_count} players")
 

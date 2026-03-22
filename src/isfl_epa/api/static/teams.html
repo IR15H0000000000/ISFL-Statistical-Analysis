@@ -184,6 +184,46 @@
   }
 
   footer a { color: #56d6d6; text-decoration: none; }
+
+  #category-toggles {
+    max-width: 1400px;
+    margin: 0 auto 0.5rem;
+    padding: 0 1rem;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  #category-toggles .cat-label {
+    font-size: 11px;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  #category-toggles button {
+    padding: 4px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    color: #666;
+    font-size: 11px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: all 0.15s;
+  }
+
+  #category-toggles button.active {
+    background: #1a1a2e;
+    color: #fff;
+    border-color: #1a1a2e;
+  }
+
+  #category-toggles button:hover:not(.active) {
+    background: #f0f0f0;
+  }
 </style>
 </head>
 <body>
@@ -196,6 +236,7 @@
     <a href="/static/leaderboard.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Players</a>
     <a href="/static/plays.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Plays</a>
     <a href="/static/visualizations.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Viz</a>
+    <a href="/static/drives.html" style="color:#8888aa;text-decoration:none;text-transform:uppercase;letter-spacing:1px;font-weight:600">Drives</a>
   </div>
   <nav>
     <button id="btn-offensive" class="active" onclick="switchSide('offensive')">Offensive</button>
@@ -215,6 +256,13 @@
     </div>
   </div>
   <div class="updated" id="update-info"></div>
+</div>
+
+<div id="category-toggles">
+  <span class="cat-label">Show:</span>
+  <button id="cat-passing"  onclick="toggleCategory('passing')">Passing Stats</button>
+  <button id="cat-rushing"  onclick="toggleCategory('rushing')">Rushing Stats</button>
+  <button id="cat-turnover" onclick="toggleCategory('turnover')">Turnover Stats</button>
 </div>
 
 <div class="table-wrap">
@@ -237,20 +285,23 @@ const OFFENSIVE_COLUMNS = [
   { key: "team",        label: "Team",        fmt: "str",  align: "left",   epa: false },
   { key: "record",      label: "Record",      fmt: "str",  align: "center", epa: false },
   { key: "points_for",  label: "PF",          fmt: "int",  align: "right",  epa: false },
-  { key: "epa_per_play",label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
-  { key: "total_epa",   label: "Total EPA",   fmt: "dec2", align: "right",  epa: true, ranked: true },
+  { key: "total_epa",   label: "Off EPA",     fmt: "dec2", align: "right",  epa: true, ranked: true },
   { key: "success_pct", label: "Success %",   fmt: "pct1", align: "right",  epa: false },
-  { key: "epa_per_pass",label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true  },
-  { key: "epa_per_rush",label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true  },
-  { key: "pass_yards",  label: "Pass Yards",  fmt: "int",  align: "right",  epa: false },
-  { key: "comp_pct",    label: "Comp %",      fmt: "pct1", align: "right",  epa: false },
-  { key: "pass_td",     label: "Pass TD",     fmt: "int",  align: "right",  epa: false },
-  { key: "rush_yards",  label: "Rush Yards",  fmt: "int",  align: "right",  epa: false },
-  { key: "rush_td",     label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
-  { key: "sack_pct",    label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
-  { key: "int_pct",     label: "Int %",       fmt: "pct1", align: "right",  epa: false },
-  { key: "fumbles_lost",      label: "FL", fmt: "int", align: "right", epa: false },
-  { key: "fumble_recoveries", label: "FR", fmt: "int", align: "right", epa: false },
+  { key: "net_epa_plus",label: "Net EPA+",    fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
+  { key: "off_epa_plus",label: "EPA+",        fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
+  { key: "epa_per_play",label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
+  { key: "epa_per_pass",label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true,  category: "passing" },
+  { key: "pass_yards",  label: "Pass YDS",  fmt: "int",  align: "right",  epa: false, category: "passing" },
+  { key: "pass_td",     label: "Pass TD",     fmt: "int",  align: "right",  epa: false, category: "passing" },
+  { key: "comp_pct",    label: "Comp %",      fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "sack_pct",    label: "Sack %",      fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "int_pct",     label: "Int %",       fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "epa_per_rush",label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true,  category: "rushing" },
+  { key: "rush_yards",  label: "Rush YDS",  fmt: "int",  align: "right",  epa: false, category: "rushing" },
+  { key: "rush_td",     label: "Rush TD",     fmt: "int",  align: "right",  epa: false, category: "rushing" },
+  { key: "fumbles_total",   label: "FUM", fmt: "int",  align: "right", epa: false, category: "turnover" },
+  { key: "fumbles_lost",    label: "FL",  fmt: "int",  align: "right", epa: false, category: "turnover" },
+  { key: "fumble_lost_pct", label: "FL%", fmt: "pct1", align: "right", epa: false, category: "turnover" },
 ];
 
 const DEFENSIVE_COLUMNS = [
@@ -258,20 +309,22 @@ const DEFENSIVE_COLUMNS = [
   { key: "team",           label: "Team",        fmt: "str",  align: "left",   epa: false },
   { key: "record",         label: "Record",      fmt: "str",  align: "center", epa: false },
   { key: "points_against", label: "PA",          fmt: "int",  align: "right",  epa: false },
-  { key: "epa_per_play",   label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
-  { key: "total_epa",      label: "Total EPA",   fmt: "dec2", align: "right",  epa: true, ranked: true },
+  { key: "total_epa",      label: "Def EPA",     fmt: "dec2", align: "right",  epa: true, ranked: true },
   { key: "success_pct",    label: "Success %",   fmt: "pct1", align: "right",  epa: false },
-  { key: "epa_per_pass",   label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true  },
-  { key: "epa_per_rush",   label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true  },
-  { key: "pass_yards",     label: "Pass Yards",  fmt: "int",  align: "right",  epa: false },
-  { key: "comp_pct",       label: "Comp %",      fmt: "pct1", align: "right",  epa: false },
-  { key: "pass_td",        label: "Pass TD",     fmt: "int",  align: "right",  epa: false },
-  { key: "rush_yards",     label: "Rush Yards",  fmt: "int",  align: "right",  epa: false },
-  { key: "rush_td",        label: "Rush TD",     fmt: "int",  align: "right",  epa: false },
-  { key: "sack_pct",       label: "Sack %",      fmt: "pct1", align: "right",  epa: false },
-  { key: "int_pct",        label: "Int %",       fmt: "pct1", align: "right",  epa: false },
-  { key: "forced_fumbles",    label: "FF", fmt: "int", align: "right", epa: false },
-  { key: "fumble_recoveries", label: "FR", fmt: "int", align: "right", epa: false },
+  { key: "def_epa_plus",   label: "EPA+",        fmt: "dec1", align: "right",  epa: true, ranked: true, zeroCentered: true },
+  { key: "epa_per_play",   label: "EPA/Play",    fmt: "dec3", align: "right",  epa: true, ranked: true },
+  { key: "epa_per_pass",   label: "EPA/Pass",    fmt: "dec3", align: "right",  epa: true,  category: "passing" },
+  { key: "pass_yards",     label: "Pass YDS",  fmt: "int",  align: "right",  epa: false, category: "passing" },
+  { key: "pass_td",        label: "Pass TD",     fmt: "int",  align: "right",  epa: false, category: "passing" },
+  { key: "comp_pct",       label: "Comp %",      fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "sack_pct",       label: "Sack %",      fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "int_pct",        label: "Int %",       fmt: "pct1", align: "right",  epa: false, category: "passing" },
+  { key: "epa_per_rush",   label: "EPA/Rush",    fmt: "dec3", align: "right",  epa: true,  category: "rushing" },
+  { key: "rush_yards",     label: "Rush YDS",  fmt: "int",  align: "right",  epa: false, category: "rushing" },
+  { key: "rush_td",        label: "Rush TD",     fmt: "int",  align: "right",  epa: false, category: "rushing" },
+  { key: "forced_fumbles",        label: "FF",  fmt: "int",  align: "right", epa: false, category: "turnover" },
+  { key: "def_fumble_recoveries", label: "FR",  fmt: "int",  align: "right", epa: false, category: "turnover" },
+  { key: "fumble_recovery_pct",   label: "FR%", fmt: "pct1", align: "right", epa: false, category: "turnover" },
 ];
 
 let currentData = [];
@@ -281,9 +334,18 @@ let playoffSeasons = new Set();
 let sortKey = "epa_per_play";
 let sortAsc = false;
 let currentController = null;
+let visibleCategories = new Set();
 
 function getColumns() {
-  return currentSide === "defensive" ? DEFENSIVE_COLUMNS : OFFENSIVE_COLUMNS;
+  const cols = currentSide === "defensive" ? DEFENSIVE_COLUMNS : OFFENSIVE_COLUMNS;
+  return cols.filter(col => !col.category || visibleCategories.has(col.category));
+}
+
+function toggleCategory(id) {
+  if (visibleCategories.has(id)) visibleCategories.delete(id);
+  else visibleCategories.add(id);
+  document.getElementById(`cat-${id}`).classList.toggle("active", visibleCategories.has(id));
+  renderTable();
 }
 
 function formatVal(val, fmt) {
@@ -332,7 +394,7 @@ function buildHeaders() {
     const isActive = col.key === sortKey;
     if (isActive) th.classList.add("sort-active");
     const arrow = isActive ? (sortAsc ? " \u25B2" : " \u25BC") : " \u25BC";
-    th.innerHTML = col.label + `<span class="arrow">${arrow}</span>`;
+    th.innerHTML = (col.key === "rank" || col.key === "team") ? col.label : col.label + `<span class="arrow">${arrow}</span>`;
     if (col.key !== "rank") {
       th.onclick = () => {
         if (sortKey === col.key) {
@@ -381,7 +443,9 @@ function renderTable() {
     const vals = data.map(d => d[col.key]).filter(v => v != null);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
-    epaRanges[col.key] = { min, max, midpoint: (min + max) / 2 };
+    const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : (min + max) / 2;
+    const midpoint = col.zeroCentered ? 0 : mean;
+    epaRanges[col.key] = { min, max, midpoint };
   });
 
   // Build headers with sort indicator

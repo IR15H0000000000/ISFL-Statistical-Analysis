@@ -453,6 +453,16 @@ class TestVizEndpoints:
             assert "avg_ep" in row
             assert "count" in row
 
+    def test_viz_ep_by_drive_start(self, client):
+        resp = client.get("/epa/viz/ep-by-drive-start?season_min=50&season_max=50")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        for row in data:
+            assert "yardline" in row
+            assert "avg_ep" in row
+            assert "count" in row
+
 
 class TestErrorResponses:
     def test_unknown_stat_category(self, client):
