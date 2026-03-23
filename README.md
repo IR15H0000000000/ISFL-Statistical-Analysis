@@ -32,25 +32,27 @@ The database contains fully parsed play-by-play data across **59 ISFL seasons**,
 | | Count |
 |--|------:|
 | Seasons | 59 |
-| Games | 6,256 |
-| Plays | 1,233,292 |
-| Unique Players | 11,120 |
+| Games | 6,291 |
+| Plays | 1,238,998 |
+| Unique Players | 15,429 |
+| Rostered Players | 2,827 |
 
 ### Play Type Breakdown
 
 | Play Type | Count | Pct |
 |-----------|------:|----:|
-| pass | 521,467 | 42.3% |
-| rush | 364,093 | 29.5% |
-| kickoff | 93,398 | 7.6% |
-| punt | 76,706 | 6.2% |
-| penalty | 50,076 | 4.1% |
-| sack | 45,810 | 3.7% |
-| quarter_marker | 33,588 | 2.7% |
-| field_goal | 27,933 | 2.3% |
+| pass | 523,714 | 42.3% |
+| rush | 366,037 | 29.5% |
+| kickoff | 93,778 | 7.6% |
+| punt | 77,038 | 6.2% |
+| penalty | 50,260 | 4.1% |
+| sack | 46,042 | 3.7% |
+| quarter_marker | 33,764 | 2.7% |
+| field_goal | 28,074 | 2.3% |
 | timeout | 9,973 | 0.8% |
-| spike | 5,306 | 0.4% |
-| kneel | 4,895 | 0.4% |
+| spike | 5,336 | 0.4% |
+| kneel | 4,935 | 0.4% |
+| unknown | 47 | 0.0% |
 
 ### Per-Season Summary
 
@@ -114,7 +116,7 @@ The database contains fully parsed play-by-play data across **59 ISFL seasons**,
 | 56 | 146 | 23,904 | 9,867 | 7,595 | 790 | 207 |
 | 57 | 147 | 23,952 | 9,797 | 7,599 | 781 | 225 |
 | 58 | 147 | 24,099 | 10,120 | 7,628 | 788 | 242 |
-| 59 | 112 | 18,459 | 7,187 | 6,253 | 617 | 153 |
+| 59 | 147 | 24,165 | 9,434 | 8,197 | 804 | 211 |
 
 Run `uv run isfl-epa summary` to regenerate this from the live database, or `--season 50` for a single season.
 
@@ -284,7 +286,7 @@ tests/
   stats_cross_validate_test.py # 8 tests validating stats vs boxscores
   registry_test.py            # 14 tests for player registry
   storage_test.py             # Parquet + PostgreSQL round-trip tests
-  api_test.py                 # 11 FastAPI endpoint tests
+  api_test.py                 # 38 FastAPI endpoint tests
   epa_test.py                 # 44 tests for EPA pipeline (drive labeling, model, calculator)
 notebooks/
   01_data_exploration.ipynb  # Raw data exploration
@@ -355,6 +357,15 @@ When running via Docker Compose, the FastAPI server provides:
 | `GET /epa/seasons` | Seasons with EPA data |
 | `GET /epa/teams?season=` | Teams, optionally filtered by season |
 | `GET /epa/positions` | Distinct player positions |
+| `GET /epa/games?season=` | List games with EPA data |
+| `GET /epa/plays?season=&side=&team=&player_id=` | Play browser with EPA values |
+| `GET /epa/viz/ep-by-distance` | EP model visualization by down/distance |
+| `GET /epa/viz/epa-by-down-distance` | EPA heatmap by down and distance |
+| `GET /epa/viz/ep-by-yardline` | EP curve by field position |
+| `GET /epa/viz/ep-by-time` | EP by game time remaining |
+| `GET /epa/viz/ep-by-drive-start` | EP by drive starting position |
+| `GET /epa/viz/fourth-down-decisions` | Fourth down decision analysis |
+| `GET /epa/viz/fourth-down-by-time` | Fourth down decisions by game time |
 
 Full OpenAPI docs at `http://localhost:8000/docs`.
 
