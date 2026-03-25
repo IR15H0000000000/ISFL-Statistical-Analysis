@@ -540,6 +540,8 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
         # 1. Precomputed defensive EPA + success rate
         def_epa = _read_team_epa(conn, season, game_type, side="defensive")
         league_avg_def = _league_avg_team_epa(conn, season, game_type, "defensive")
+        league_avg_off = _league_avg_team_epa(conn, season, game_type, "offensive")
+        off_epa = _read_team_epa(conn, season, game_type, side="offensive")
 
         # 2. Defensive traditional stats: what opponents did against each team
         tg = team_games_table
@@ -601,6 +603,9 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
 
             def_epa_per = epa_data.get("epa_per_play", 0)
             def_epa_plus = round((def_epa_per - league_avg_def) * 100, 1) if league_avg_def is not None else None
+            team_off_epa_per = off_epa.get(team, {}).get("epa_per_play")
+            off_epa_plus = round((team_off_epa_per - league_avg_off) * 100, 1) if (team_off_epa_per is not None and league_avg_off is not None) else None
+            net_epa_plus = round(off_epa_plus - def_epa_plus, 1) if (off_epa_plus is not None and def_epa_plus is not None) else None
 
             results.append({
                 "team": team,
@@ -612,6 +617,7 @@ def _defensive_dashboard(engine, season: int, game_type: str = "regular") -> lis
                 "epa_per_play": round(def_epa_per, 3),
                 "total_epa": round(epa_data.get("total_epa", 0), 2),
                 "def_epa_plus": def_epa_plus,
+                "net_epa_plus": net_epa_plus,
                 "success_pct": round(epa_data.get("success_rate", 0) * 100, 1),
                 "epa_per_pass": round(epa_data.get("pass_epa", 0) / opp_dropbacks, 3) if opp_dropbacks else 0,
                 "epa_per_rush": round(epa_data.get("rush_epa", 0) / opp_rush_att, 3) if opp_rush_att else 0,

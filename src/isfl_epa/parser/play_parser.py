@@ -82,15 +82,15 @@ _ONSIDE_RECOVERY_RE = re.compile(
 )
 _FREE_KICK_RE = re.compile(r"Free Kick by (.+?) of (\d+) yards")
 _PUNT_RE = re.compile(r"Punt by (.+?) of (\d+) yards")
-_PUNT_BLOCKED_RE = re.compile(r"Punt by (.+?) is BLOCKED BY (.+)\.(?=\.|<|\s|$)")
+_PUNT_BLOCKED_RE = re.compile(r"Punt by (.+?) is BLOCKED BY ([^<]+)\.(?=\.|<|\s|$)")
 _FG_RE = re.compile(r"(\d+) yard FG by (.+?) is (good|NO good)")
-_FG_BLOCKED_RE = re.compile(r"(\d+) yard FG by (.+?) is BLOCKED by (.+)\.(?=\.|<|\s|$)")
+_FG_BLOCKED_RE = re.compile(r"(\d+) yard FG by (.+?) is BLOCKED by ([^<]+)\.(?=\.|<|\s|$)")
 _SACK_RE = re.compile(r"(.+?) (?:is )?SACKED by (.+?) - \w+ for (-?\d+) yds")
 _PASS_COMPLETE_RE = re.compile(
     r"Pass by (.+?), complete to (.+?) for (-?\d+ yds|a short gain)"
 )
 _PASS_INCOMPLETE_BROKEN_RE = re.compile(
-    r"Pass by (.+?) to (.+?) is incomplete\. Broken up by (.+)\.(?=\.|<|\s|$)"
+    r"Pass by (.+?) to (.+?) is incomplete\. Broken up by ([^<]+)\.(?=\.|<|\s|$)"
 )
 _PASS_INCOMPLETE_FALLS_RE = re.compile(
     r"Pass by (.+?) to (.+?) falls incomplete"
@@ -122,7 +122,7 @@ _FIRST_DOWN_RE = re.compile(r"First Down")
 _FUMBLE_LOST_RE = re.compile(
     r"FUMBLE recovered by (.+?) at .+? yard line and returned for (\d+)"
 )
-_FUMBLE_KEPT_RE = re.compile(r"FUMBLE by (.+?), recovered by (.+)\.(?=\.|<|\s|$)")
+_FUMBLE_KEPT_RE = re.compile(r"FUMBLE by (.+?), recovered by ([^<]+)\.(?=\.|<|\s|$)")
 _INTERCEPTION_RE = re.compile(
     r"INTERCEPTION by (.+?) at .+? yard line and returned for (-?\d+)"
 )
@@ -130,7 +130,7 @@ _TIMEOUT_APPENDED_RE = re.compile(r"Timeout called by (\w+)")
 _TURNOVER_ON_DOWNS_RE = re.compile(r"Turnover on downs")
 _AUTO_FIRST_DOWN_RE = re.compile(r"Automatic First Down")
 _SAFETY_RE = re.compile(r"Safety")
-_TACKLE_RE = re.compile(r"Tackle by (.+)\.(?=\.|<|\s|$)")
+_TACKLE_RE = re.compile(r"Tackle by ([^<]+)\.(?=\.|<|\s|$)")
 _PUNT_RETURN_RE = re.compile(r"Returned by (.+?) for (\d+) yards")
 
 
