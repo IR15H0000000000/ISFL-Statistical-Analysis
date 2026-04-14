@@ -1038,5 +1038,20 @@ def backfill_game_types(
     console.print("[yellow]Run compute-epa for each season to regenerate EPA with game_type separation.[/yellow]")
 
 
+@app.command("backfill-viz-columns")
+def backfill_viz_columns_cmd(
+    database_url: str = typer.Option(None, help="PostgreSQL URL"),
+):
+    """Backfill pre-computed yardline_100 and half_seconds columns for existing plays."""
+    from isfl_epa.storage.database import backfill_viz_columns, create_tables, get_engine
+
+    engine = get_engine(database_url)
+    create_tables(engine)
+
+    console.print("Backfilling yardline_100 and half_seconds...")
+    count = backfill_viz_columns(engine)
+    console.print(f"  Done. {count} plays now have yardline_100.")
+
+
 if __name__ == "__main__":
     app()

@@ -23,6 +23,7 @@ from sqlalchemy import (
     Table,
     Text,
     create_engine,
+    distinct,
     func,
     insert,
     select,
@@ -143,6 +144,9 @@ plays_table = Table(
     Column("fg_distance", Integer),
     Column("fg_good", Boolean),
     Column("pat_good", Boolean),
+    # Pre-computed columns for viz queries
+    Column("yardline_100", Integer),
+    Column("half_seconds", Integer),
     # Indexes
     Index("ix_plays_game_id", "game_id"),
     Index("ix_plays_season", "season"),
@@ -154,6 +158,9 @@ plays_table = Table(
     Index("ix_plays_sacker", "player_id_sacker"),
     Index("ix_plays_interceptor", "player_id_interceptor"),
     Index("ix_plays_fumble_recoverer", "player_id_fumble_recoverer"),
+    # Composite indexes for viz endpoint queries
+    Index("ix_plays_viz", "season", "game_type", "play_type", "down"),
+    Index("ix_plays_game_play_idx", "game_id", "play_index"),
 )
 
 team_games_table = Table(
@@ -274,6 +281,7 @@ play_epa_table = Table(
     Column("epa", Float),
     Index("ix_play_epa_game_id", "game_id"),
     Index("ix_play_epa_season", "season"),
+    Index("ix_play_epa_play_id_vals", "play_id", "ep_before", "epa"),
 )
 
 player_season_epa_table = Table(
@@ -373,6 +381,28 @@ def create_tables(engine: Engine) -> None:
         conn.execute(text(
             "ALTER TABLE team_games ADD COLUMN IF NOT EXISTS "
             "fumble_recoveries INTEGER DEFAULT 0"
+        ))
+        # Pre-computed viz columns
+        conn.execute(text(
+            "ALTER TABLE plays ADD COLUMN IF NOT EXISTS "
+            "yardline_100 INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE plays ADD COLUMN IF NOT EXISTS "
+            "half_seconds INTEGER"
+        ))
+        # Composite indexes for viz queries (IF NOT EXISTS requires PG 9.5+)
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_plays_viz "
+            "ON plays (season, game_type, play_type, down)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_plays_game_play_idx "
+            "ON plays (game_id, play_index)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_play_epa_play_id_vals "
+            "ON play_epa (play_id, ep_before, epa)"
         ))
         conn.commit()
 
@@ -610,6 +640,31 @@ def load_season(
     )
 
 
+def _compute_yardline_100(play, team_abbr: str | None) -> int | None:
+    """Compute yardline_100 for a single play at load time."""
+    if play.yard_line is None or play.yard_line_team is None or team_abbr is None:
+        return None
+    if play.yard_line_team == team_abbr:
+        return play.yard_line
+    return 100 - play.yard_line
+
+
+def _compute_half_seconds(play) -> int | None:
+    """Compute half_seconds_remaining for a single play at load time."""
+    if play.clock is None or play.quarter is None:
+        return None
+    try:
+        parts = play.clock.split(":")
+        clock_secs = int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, IndexError):
+        return None
+    if play.quarter >= 5:
+        return 0
+    if play.quarter in (1, 3):
+        return clock_secs + 900
+    return clock_secs
+
+
 def _build_play_dicts(game: Game, registry: PlayerRegistry) -> list[dict]:
     """Build list of play insert dicts for a game."""
     rows = []
@@ -676,6 +731,8 @@ def _build_play_dicts(game: Game, registry: PlayerRegistry) -> list[dict]:
             "fg_distance": play.fg_distance,
             "fg_good": play.fg_good,
             "pat_good": play.pat_good,
+            "yardline_100": _compute_yardline_100(play, team_abbr),
+            "half_seconds": _compute_half_seconds(play),
         })
     return rows
 
@@ -1181,6 +1238,74 @@ def load_player_positions(
 # ---------------------------------------------------------------------------
 # Team ID mapping
 # ---------------------------------------------------------------------------
+
+
+def backfill_viz_columns(engine: Engine) -> int:
+    """Backfill yardline_100 and half_seconds for plays missing them."""
+    p = plays_table
+
+    with engine.begin() as conn:
+        # half_seconds: pure SQL, depends only on clock + quarter
+        conn.execute(text("""
+            UPDATE plays SET half_seconds = CASE
+                WHEN quarter >= 5 THEN 0
+                WHEN quarter IN (1, 3) THEN
+                    CAST(SPLIT_PART(clock, ':', 1) AS INTEGER) * 60
+                    + CAST(SPLIT_PART(clock, ':', 2) AS INTEGER)
+                    + 900
+                ELSE
+                    CAST(SPLIT_PART(clock, ':', 1) AS INTEGER) * 60
+                    + CAST(SPLIT_PART(clock, ':', 2) AS INTEGER)
+            END
+            WHERE half_seconds IS NULL
+              AND clock IS NOT NULL
+              AND quarter IS NOT NULL
+        """))
+
+        hs_count = conn.execute(text(
+            "SELECT COUNT(*) FROM plays WHERE half_seconds IS NOT NULL"
+        )).scalar()
+        logger.info("backfill_viz_columns: %d plays now have half_seconds", hs_count)
+
+    # yardline_100: needs ptid->abbr mapping per season
+    with engine.connect() as conn:
+        seasons = [r[0] for r in conn.execute(
+            select(distinct(p.c.season)).where(p.c.yardline_100.is_(None))
+        ).fetchall()]
+
+    if not seasons:
+        logger.info("backfill_viz_columns: yardline_100 already complete")
+        return hs_count
+
+    ptid_abbrs = get_team_id_to_all_abbrs(engine, seasons)
+
+    # Build SQL CASE: if possession_team_id matches and yard_line_team is in its abbrs
+    same_side_cases = []
+    for ptid, abbrs in ptid_abbrs.items():
+        abbr_list = ",".join(f"'{a}'" for a in abbrs)
+        same_side_cases.append(
+            f"WHEN possession_team_id = {ptid} AND yard_line_team IN ({abbr_list}) THEN yard_line"
+        )
+    case_sql = "\n                ".join(same_side_cases)
+
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            UPDATE plays SET yardline_100 = CASE
+                {case_sql}
+                ELSE 100 - yard_line
+            END
+            WHERE yardline_100 IS NULL
+              AND yard_line IS NOT NULL
+              AND yard_line_team IS NOT NULL
+              AND possession_team_id IS NOT NULL
+        """))
+
+        yl_count = conn.execute(text(
+            "SELECT COUNT(*) FROM plays WHERE yardline_100 IS NOT NULL"
+        )).scalar()
+
+    logger.info("backfill_viz_columns: %d plays now have yardline_100", yl_count)
+    return yl_count
 
 
 def get_team_id_to_abbr(engine: Engine, season: int) -> dict[int, str]:

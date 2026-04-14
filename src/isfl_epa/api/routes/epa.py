@@ -11,7 +11,7 @@ _CACHE_TTL = 300  # 5 minutes
 
 # Visualization cache: (endpoint, season_min, season_max, game_type) -> (timestamp, data)
 _viz_cache: dict[tuple, tuple[float, object]] = {}
-_VIZ_CACHE_TTL = 300  # 5 minutes
+_VIZ_CACHE_TTL = 3600  # 1 hour (data only changes on rebuild)
 
 
 def _viz_cached(key: tuple, compute_fn):
@@ -22,6 +22,12 @@ def _viz_cached(key: tuple, compute_fn):
     result = compute_fn()
     _viz_cache[key] = (time.time(), result)
     return result
+
+
+def invalidate_viz_cache():
+    """Clear all viz cache entries. Call after data rebuild/EPA recompute."""
+    _viz_cache.clear()
+    _dashboard_cache.clear()
 
 from isfl_epa.storage.database import (
     games_table,
@@ -1856,56 +1862,7 @@ def viz_ep_by_yardline(
         p = plays_table
         pe = play_epa_table
 
-        # Compute yardline_100 in SQL: if yard_line_team matches possession
-        # team abbreviation, use yard_line; otherwise 100 - yard_line.
-        # We need to resolve possession_team_id -> abbreviation to compare
-        # with yard_line_team. Use a subquery that joins team info.
-        #
-        # However, team_id -> abbr mapping requires the intersection-based
-        # approach. Instead, we use the fact that for seasons with home_team/
-        # away_team, we can derive possession_team from those fields.
-        # For S27+: possession_team_id corresponds to one of home_team/away_team.
-        # For S1-26: home_team/away_team are NULL, but we still have
-        # yard_line_team and possession_team_id — we need the mapping.
-        #
-        # Simplest SQL approach: compute yardline_100 as a CASE on whether
-        # yard_line_team equals home_team or away_team (which tells us
-        # which side of the field), combined with possession info.
-        #
-        # Actually, the simplest: build team map once, then use SQL with
-        # a values list or just do it all in SQL with a self-join approach.
-        #
-        # Most practical: do the aggregation in SQL by computing yardline_100
-        # using a helper table. But that's complex. Let's take a middle ground:
-        # build the ptid->abbr map efficiently (single query), then use pandas
-        # but only fetch needed columns.
-
-        # First, build ptid->abbr map with a single query across all seasons
-        with engine.connect() as conn:
-            season_stmt = select(distinct(p.c.season)).where(
-                p.c.season.between(eff_min, eff_max)
-            )
-            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
-
-            if not seasons:
-                return []
-
-            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
-
-        if not ptid_abbrs:
-            return []
-
-        # yardline_100: if yard_line_team matches any abbreviation for the
-        # possession team, use yard_line; otherwise 100 - yard_line.
-        # Handles rebranded teams (e.g., CHI→OSK) by checking all abbreviations.
-        same_side_cases = [
-            (and_(p.c.possession_team_id == ptid, p.c.yard_line_team.in_(abbrs)), p.c.yard_line)
-            for ptid, abbrs in ptid_abbrs.items()
-        ]
-        yardline_100 = case(*same_side_cases, else_=100 - p.c.yard_line)
-
-        # Bucket into groups of 5 yards
-        bucket = cast(yardline_100 / 5, Integer) * 5
+        bucket = cast(p.c.yardline_100 / 5, Integer) * 5
 
         stmt = (
             select(
@@ -1920,12 +1877,10 @@ def viz_ep_by_yardline(
             .where(p.c.down.in_([1, 2, 3, 4]))
             .where(p.c.game_type == game_type)
             .where(p.c.season.between(eff_min, eff_max))
-            .where(p.c.yard_line.isnot(None))
-            .where(p.c.yard_line_team.isnot(None))
-            .where(p.c.possession_team_id.isnot(None))
+            .where(p.c.yardline_100.isnot(None))
             .where(pe.c.ep_before.isnot(None))
-            .where(yardline_100 >= 1)
-            .where(yardline_100 <= 99)
+            .where(p.c.yardline_100 >= 1)
+            .where(p.c.yardline_100 <= 99)
             .group_by(bucket, p.c.down)
             .having(func.count() >= 100)
             .order_by(bucket, p.c.down)
@@ -1964,26 +1919,7 @@ def viz_ep_by_time(
         p = plays_table
         pe = play_epa_table
 
-        # Parse clock "MM:SS" to seconds in SQL
-        # Use split_part for PostgreSQL, instr+substr for SQLite
-        is_sqlite = engine.dialect.name == "sqlite"
-        if is_sqlite:
-            colon_pos = func.instr(p.c.clock, ":")
-            minutes_str = func.substr(p.c.clock, 1, colon_pos - 1)
-            seconds_str = func.substr(p.c.clock, colon_pos + 1)
-        else:
-            minutes_str = func.split_part(p.c.clock, ":", 1)
-            seconds_str = func.split_part(p.c.clock, ":", 2)
-        clock_secs = cast(minutes_str, Integer) * 60 + cast(seconds_str, Integer)
-
-        # Half seconds remaining based on quarter
-        half_secs = case(
-            (p.c.quarter >= 5, 0),
-            (p.c.quarter.in_([1, 3]), clock_secs + 900),
-            else_=clock_secs,
-        )
-
-        minute_bucket = cast(half_secs / 60, Integer).label("minute")
+        minute_bucket = cast(p.c.half_seconds / 60, Integer).label("minute")
 
         stmt = (
             select(
@@ -1998,8 +1934,7 @@ def viz_ep_by_time(
             .where(p.c.down.in_([1, 2, 3, 4]))
             .where(p.c.game_type == game_type)
             .where(p.c.season.between(eff_min, eff_max))
-            .where(p.c.clock.isnot(None))
-            .where(p.c.quarter.isnot(None))
+            .where(p.c.half_seconds.isnot(None))
             .where(pe.c.ep_before.isnot(None))
             .group_by(minute_bucket, p.c.down)
             .having(func.count() >= 100)
@@ -2058,21 +1993,18 @@ def viz_ep_by_drive_start(
                 p.c.id.label("play_id"),
                 p.c.game_id,
                 p.c.play_index,
-                p.c.season,
-                p.c.possession_team_id,
-                p.c.yard_line,
-                p.c.yard_line_team,
+                p.c.yardline_100,
                 prev_ptid.label("prev_ptid"),
                 prev_half.label("prev_half"),
                 prev_idx.label("prev_idx"),
                 half.label("half"),
+                p.c.possession_team_id,
             )
             .where(p.c.play_type.in_(["pass", "rush", "sack", "field_goal"]))
             .where(p.c.game_type == game_type)
             .where(p.c.season.between(eff_min, eff_max))
             .where(p.c.possession_team_id.isnot(None))
-            .where(p.c.yard_line.isnot(None))
-            .where(p.c.yard_line_team.isnot(None))
+            .where(p.c.yardline_100.isnot(None))
             .where(p.c.quarter.isnot(None))
         ).cte("scrimmage")
 
@@ -2098,30 +2030,7 @@ def viz_ep_by_drive_start(
             )
         ).cte("drive_starts")
 
-        # Build ptid->abbr map for yardline_100 computation
-        with engine.connect() as conn:
-            season_stmt = select(distinct(p.c.season)).where(
-                p.c.season.between(eff_min, eff_max)
-            )
-            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
-
-            if not seasons:
-                return []
-
-            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
-
-        if not ptid_abbrs:
-            return []
-
-        # yardline_100: check yard_line_team against all abbreviations for
-        # the possession team (handles rebrands like CHI→OSK)
-        same_side_cases = [
-            (and_(drive_starts.c.possession_team_id == ptid, drive_starts.c.yard_line_team.in_(abbrs)), drive_starts.c.yard_line)
-            for ptid, abbrs in ptid_abbrs.items()
-        ]
-        yardline_100 = case(*same_side_cases, else_=100 - drive_starts.c.yard_line)
-
-        bucket = cast(yardline_100 / 5, Integer) * 5
+        bucket = cast(drive_starts.c.yardline_100 / 5, Integer) * 5
 
         stmt = (
             select(
@@ -2132,8 +2041,8 @@ def viz_ep_by_drive_start(
             .select_from(drive_starts)
             .join(pe, pe.c.play_id == drive_starts.c.play_id)
             .where(pe.c.ep_before.isnot(None))
-            .where(yardline_100 >= 1)
-            .where(yardline_100 <= 99)
+            .where(drive_starts.c.yardline_100 >= 1)
+            .where(drive_starts.c.yardline_100 <= 99)
             .group_by(bucket)
             .having(func.count() >= 30)
             .order_by(bucket)
@@ -2220,26 +2129,7 @@ def viz_fourth_down_decisions(
     def _compute():
         p = plays_table
 
-        with engine.connect() as conn:
-            season_stmt = select(distinct(p.c.season)).where(
-                p.c.season.between(eff_min, eff_max)
-            )
-            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
-
-            if not seasons:
-                return []
-
-            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
-
-        if not ptid_abbrs:
-            return []
-
-        same_side_cases = [
-            (and_(p.c.possession_team_id == ptid, p.c.yard_line_team.in_(abbrs)), p.c.yard_line)
-            for ptid, abbrs in ptid_abbrs.items()
-        ]
-        yardline_100 = case(*same_side_cases, else_=100 - p.c.yard_line)
-        bucket = cast(yardline_100 / 5, Integer) * 5
+        bucket = cast(p.c.yardline_100 / 5, Integer) * 5
 
         go_count, punt_count, fg_count, total = _fourth_down_count_exprs(p)
 
@@ -2255,15 +2145,21 @@ def viz_fourth_down_decisions(
             .where(p.c.play_type.in_(["pass", "rush", "sack", "punt", "field_goal"]))
             .where(p.c.game_type == game_type)
             .where(p.c.season.between(eff_min, eff_max))
-            .where(p.c.yard_line.isnot(None))
-            .where(p.c.yard_line_team.isnot(None))
-            .where(p.c.possession_team_id.isnot(None))
-            .where(yardline_100 >= 1)
-            .where(yardline_100 <= 99)
+            .where(p.c.yardline_100.isnot(None))
+            .where(p.c.yardline_100 >= 1)
+            .where(p.c.yardline_100 <= 99)
         )
 
-        for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
-            stmt = stmt.where(f)
+        # Score filter still needs team mapping for score_diff computation
+        if score_filter != "all":
+            with engine.connect() as conn:
+                season_stmt = select(distinct(p.c.season)).where(
+                    p.c.season.between(eff_min, eff_max)
+                )
+                seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons]) if seasons else {}
+            for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
+                stmt = stmt.where(f)
 
         stmt = stmt.group_by(bucket).having(func.count() >= 20).order_by(bucket)
 
@@ -2292,37 +2188,7 @@ def viz_fourth_down_by_time(
     def _compute():
         p = plays_table
 
-        with engine.connect() as conn:
-            season_stmt = select(distinct(p.c.season)).where(
-                p.c.season.between(eff_min, eff_max)
-            )
-            seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
-
-            if not seasons:
-                return []
-
-            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons])
-
-        if not ptid_abbrs:
-            return []
-
-        # Parse clock to half-seconds remaining
-        is_sqlite = engine.dialect.name == "sqlite"
-        if is_sqlite:
-            colon_pos = func.instr(p.c.clock, ":")
-            minutes_str = func.substr(p.c.clock, 1, colon_pos - 1)
-            seconds_str = func.substr(p.c.clock, colon_pos + 1)
-        else:
-            minutes_str = func.split_part(p.c.clock, ":", 1)
-            seconds_str = func.split_part(p.c.clock, ":", 2)
-        clock_secs = cast(minutes_str, Integer) * 60 + cast(seconds_str, Integer)
-
-        half_secs = case(
-            (p.c.quarter >= 5, 0),
-            (p.c.quarter.in_([1, 3]), clock_secs + 900),
-            else_=clock_secs,
-        )
-        minute_bucket = cast(half_secs / 60, Integer)
+        minute_bucket = cast(p.c.half_seconds / 60, Integer)
 
         go_count, punt_count, fg_count, total = _fourth_down_count_exprs(p)
 
@@ -2338,13 +2204,20 @@ def viz_fourth_down_by_time(
             .where(p.c.play_type.in_(["pass", "rush", "sack", "punt", "field_goal"]))
             .where(p.c.game_type == game_type)
             .where(p.c.season.between(eff_min, eff_max))
-            .where(p.c.clock.isnot(None))
-            .where(p.c.quarter.isnot(None))
+            .where(p.c.half_seconds.isnot(None))
             .where(p.c.possession_team_id.isnot(None))
         )
 
-        for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
-            stmt = stmt.where(f)
+        # Score filter still needs team mapping for score_diff computation
+        if score_filter != "all":
+            with engine.connect() as conn:
+                season_stmt = select(distinct(p.c.season)).where(
+                    p.c.season.between(eff_min, eff_max)
+                )
+                seasons = [r[0] for r in conn.execute(season_stmt).fetchall()]
+            ptid_abbrs = get_team_id_to_all_abbrs(engine, [int(s) for s in seasons]) if seasons else {}
+            for f in _fourth_down_score_filter(p, ptid_abbrs, score_filter):
+                stmt = stmt.where(f)
 
         stmt = stmt.group_by(minute_bucket).having(func.count() >= 20).order_by(minute_bucket)
 

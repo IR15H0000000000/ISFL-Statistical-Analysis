@@ -18,6 +18,33 @@ from isfl_epa.storage.database import create_tables, get_engine
 logger = logging.getLogger(__name__)
 
 
+def _warm_viz_cache(app_instance: FastAPI) -> None:
+    """Pre-compute default viz cache entries so the first visitor gets instant results."""
+    import threading
+
+    def _warm():
+        from starlette.testclient import TestClient
+
+        try:
+            client = TestClient(app_instance, raise_server_exceptions=False)
+            endpoints = [
+                "/epa/viz/epa-by-down-distance",
+                "/epa/viz/ep-by-distance",
+                "/epa/viz/ep-by-yardline",
+                "/epa/viz/ep-by-time",
+                "/epa/viz/ep-by-drive-start",
+                "/epa/viz/fourth-down-decisions",
+                "/epa/viz/fourth-down-by-time",
+            ]
+            for ep in endpoints:
+                client.get(ep)
+            logger.info("Viz cache warmed: %d endpoints", len(endpoints))
+        except Exception as exc:
+            logger.warning("Viz cache warmup failed: %s", exc)
+
+    threading.Thread(target=_warm, daemon=True).start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from isfl_epa.logging_config import setup_logging
@@ -26,6 +53,7 @@ async def lifespan(app: FastAPI):
     engine = get_engine()
     create_tables(engine)
     app.state.engine = engine
+    _warm_viz_cache(app)
     yield
     engine.dispose()
 

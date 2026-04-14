@@ -444,7 +444,7 @@ async function reloadCharts() {
     distanceChart = new Chart(document.getElementById("chart-distance"), {
       type: "line",
       data: { labels: distLabels, datasets: distDatasets },
-      options: chartOptions("Distance to First Down (yards)", "Expected Points"),
+      options: (() => { const o = chartOptions("Distance to First Down (yards)", "Expected Points"); o.scales.x.reverse = true; return o; })(),
     });
 
     // --- Yardline chart (by down) ---
@@ -470,7 +470,7 @@ async function reloadCharts() {
     yardlineChart = new Chart(document.getElementById("chart-yardline"), {
       type: "line",
       data: { labels: ylLabels, datasets: ylDatasets },
-      options: (() => { const o = chartOptions("Yards from Endzone", "Expected Points"); o.scales.x.reverse = true; return o; })(),
+      options: chartOptions("Yards from Own Endzone", "Expected Points"),
     });
 
     // --- Time chart (by down) ---
@@ -496,7 +496,7 @@ async function reloadCharts() {
     timeChart = new Chart(document.getElementById("chart-time"), {
       type: "line",
       data: { labels: timeLabels, datasets: timeDatasets },
-      options: chartOptions("Minutes Remaining in Half", "Expected Points"),
+      options: (() => { const o = chartOptions("Minutes Remaining in Half", "Expected Points"); o.scales.x.reverse = true; return o; })(),
     });
 
     // --- Drive Start EP chart ---
@@ -588,7 +588,7 @@ async function reloadFourthDownTime() {
   fourthDownTimeChart = new Chart(document.getElementById("chart-fourth-down-time"), {
     type: "line",
     data: { labels, datasets: makeFdDatasets(data) },
-    options: chartOptions("Minutes Remaining in Half", "Usage (%)"),
+    options: (() => { const o = chartOptions("Minutes Remaining in Half", "Usage (%)"); o.scales.x.reverse = true; return o; })(),
   });
 }
 
