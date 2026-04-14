@@ -466,10 +466,10 @@ function renderTable() {
         const range = epaRanges[col.key];
         let bg;
         if (col.ranked) {
-          const invert = currentSide === "defensive";
+          const invert = currentSide === "defensive" && col.key !== "net_epa_plus";
           bg = rankedColor(row[col.key], range.min, range.max, range.midpoint, invert);
         } else {
-          const invert = currentSide === "defensive";
+          const invert = currentSide === "defensive" && col.key !== "net_epa_plus";
           bg = epaColor(row[col.key], range.min, range.max, range.midpoint, invert);
         }
         if (bg) td.style.backgroundColor = bg;
